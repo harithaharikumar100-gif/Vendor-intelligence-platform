@@ -1,0 +1,8 @@
+streamlit
+groq
+plotly
+pandas
+reportlab
+yfinance
+requests
+python-dotenv
