@@ -50,8 +50,8 @@ vendoriq/
 
 ### 1. Clone
 ```bash
-git clone https://github.com/harithaharikumar100/vendor-intelligence-platform.git
-cd vendor-intelligence-platform
+git clone https://github.com/harithaharikumar100-gif/Vendor-intelligence-platform.git
+cd Vendor-intelligence-platform
 ```
 
 ### 2. Create virtual environment
