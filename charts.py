@@ -1,89 +1,104 @@
-# charts.py — fixed: proper gauge heights, no overlap, clean layout
+"""
+charts.py - Plotly Visualizations (SK-VDD-001 Compliant)
+---------------------------------------------------------
+Features:
+- SK-VDD-001 4-Tier Color Mapping:
+  * Low (0-24): Green #10b981
+  * Medium (25-49): Amber #f59e0b
+  * High (50-74): Orange #f97316
+  * Critical (75-100): Red #ef4444
+- 5-Dimension Radar (Spider) Chart with Category Weights
+- Overall Risk Gauge Indicator
+- Category Proportions Donut Chart
+"""
 
 import pandas as pd
 import plotly.graph_objects as go
 
-# ── Design tokens ────────────────────────────────────────────────────────────
 BG_TRANSPARENT = "rgba(0,0,0,0)"
-FONT_FAMILY    = "DM Sans, sans-serif"
-FONT_COLOR     = "#e8f0fe"
-FONT_MUTED     = "#6b7fa3"
+FONT_FAMILY = "Plus Jakarta Sans, -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif"
+FONT_COLOR = "#f1f5f9"
+FONT_MUTED = "#94a3b8"
+
+# 4-Tier Palette per SK-VDD-001 Section 7.3
+TIER_COLORS = {
+    "Low": "#10b981",      # Green (0-24)
+    "Medium": "#f59e0b",   # Amber (25-49)
+    "High": "#f97316",     # Orange (50-74)
+    "Critical": "#ef4444"  # Red (75-100)
+}
 
 CATEGORY_COLORS = {
-    "Financial":  "#00e676",
-    "Reputation": "#448aff",
-    "Key Person": "#c77dff",
-    "Cyber":      "#ffab40",
-    "Compliance": "#ff5252",
+    "Financial (30%)": "#10b981",
+    "Reputation (20%)": "#38bdf8",
+    "Key Person (20%)": "#c084fc",
+    "Tech & Cyber (20%)": "#f59e0b",
+    "Compliance (10%)": "#f43f5e",
 }
 
 GAUGE_STEPS = [
-    {"range": [0,  40],  "color": "rgba(0,230,118,0.10)"},
-    {"range": [40, 70],  "color": "rgba(255,171,64,0.10)"},
-    {"range": [70, 100], "color": "rgba(255,82,82,0.10)"},
+    {"range": [0, 24], "color": "rgba(16, 185, 129, 0.12)"},
+    {"range": [24, 49], "color": "rgba(245, 158, 11, 0.12)"},
+    {"range": [49, 74], "color": "rgba(249, 115, 22, 0.14)"},
+    {"range": [74, 100], "color": "rgba(239, 68, 68, 0.18)"},
 ]
 
-def _needle_color(score: float) -> str:
-    if score <= 40:  return "#00e676"
-    if score <= 70:  return "#ffab40"
-    return "#ff5252"
 
-def _risk_label(score: float) -> str:
-    if score <= 40:  return "LOW"
-    if score <= 70:  return "MEDIUM"
-    return "HIGH"
+def _get_tier_info(score: float) -> tuple:
+    s = int(round(score))
+    if s <= 24:
+        return "LOW RISK", TIER_COLORS["Low"]
+    elif s <= 49:
+        return "MEDIUM RISK", TIER_COLORS["Medium"]
+    elif s <= 74:
+        return "HIGH RISK", TIER_COLORS["High"]
+    else:
+        return "CRITICAL RISK", TIER_COLORS["Critical"]
+
 
 def _base_layout(**kw) -> dict:
     base = dict(
         paper_bgcolor=BG_TRANSPARENT,
-        plot_bgcolor =BG_TRANSPARENT,
+        plot_bgcolor=BG_TRANSPARENT,
         font=dict(family=FONT_FAMILY, color=FONT_COLOR, size=12),
         showlegend=False,
     )
     base.update(kw)
     return base
 
-# ── DataFrame helper ─────────────────────────────────────────────────────────
-def create_risk_dataframe(risk_scores: dict) -> pd.DataFrame:
-    return pd.DataFrame([
-        ("Financial",  risk_scores.get("financial",  50)),
-        ("Reputation", risk_scores.get("reputation", 50)),
-        ("Key Person", risk_scores.get("key_person", 50)),
-        ("Cyber",      risk_scores.get("cyber",      50)),
-        ("Compliance", risk_scores.get("compliance", 50)),
-    ], columns=["Risk Type", "Score"])
 
-# ── Overall gauge ────────────────────────────────────────────────────────────
+# ── 1. Overall Risk Gauge ──────────────────────────────────────────────────────
+
 def plot_overall_gauge(score: float) -> go.Figure:
-    score  = max(0.0, min(float(score), 100.0))
-    needle = _needle_color(score)
-    label  = _risk_label(score)
+    score = max(0.0, min(float(score), 100.0))
+    label, color = _get_tier_info(score)
 
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=score,
         number=dict(
-            font=dict(family="JetBrains Mono, monospace", size=48, color=needle),
+            font=dict(family="JetBrains Mono, monospace", size=52, color=color),
         ),
         title=dict(
-            text=f"<b>Overall Risk Score</b>",
+            text="<b>Overall Vendor Risk Score</b>",
             font=dict(family=FONT_FAMILY, size=14, color=FONT_MUTED),
         ),
         gauge=dict(
             axis=dict(
                 range=[0, 100],
-                tickwidth=0,
+                tickwidth=1,
+                tickcolor=FONT_MUTED,
                 tickfont=dict(color=FONT_MUTED, size=10, family=FONT_FAMILY),
                 tickvals=[0, 25, 50, 75, 100],
                 showticklabels=True,
             ),
-            bgcolor="rgba(0,0,0,0)",
-            borderwidth=0,
+            bgcolor="rgba(255,255,255,0.02)",
+            borderwidth=1,
+            bordercolor="rgba(255,255,255,0.08)",
             steps=GAUGE_STEPS,
-            bar=dict(color=needle, thickness=0.07,
-                     line=dict(color="rgba(0,0,0,0)", width=0)),
+            bar=dict(color=color, thickness=0.08),
             threshold=dict(
-                line=dict(color=needle, width=4),
+                line=dict(color=color, width=4),
                 thickness=0.85,
                 value=score,
             ),
@@ -91,29 +106,86 @@ def plot_overall_gauge(score: float) -> go.Figure:
     ))
 
     fig.add_annotation(
-        x=0.5, y=0.10,
-        text=f'<b style="color:{needle};font-size:13px;letter-spacing:2px;">{label} RISK</b>',
+        x=0.5, y=0.08,
+        text=f'<b style="color:{color};font-size:13px;letter-spacing:1.8px;">{label}</b>',
         showarrow=False, xref="paper", yref="paper",
     )
 
     fig.update_layout(**_base_layout(
         height=280,
-        margin=dict(t=50, b=40, l=40, r=40),
+        margin=dict(t=50, b=35, l=35, r=35),
     ))
     return fig
 
-# ── Single category gauge ────────────────────────────────────────────────────
-def plot_gauge(score: float, title: str = "Risk Score",
-               accent_color: str = None) -> go.Figure:
-    score  = max(0.0, min(float(score), 100.0))
-    needle = accent_color or _needle_color(score)
-    label  = _risk_label(score)
+
+# ── 2. 5-Dimension Radar (Spider) Chart ───────────────────────────────────────
+
+def plot_risk_radar(risk_scores: dict) -> go.Figure:
+    categories = [
+        "Financial<br>Viability (30%)",
+        "Reputational<br>Media (20%)",
+        "Key-Person &<br>Gov (20%)",
+        "Technology &<br>Cyber (20%)",
+        "Regulatory<br>Comp (10%)"
+    ]
+    raw_keys = ["financial", "reputation", "key_person", "cyber", "compliance"]
+    values = [float(risk_scores.get(k, 20)) for k in raw_keys]
+    
+    # Close polygon
+    categories_closed = categories + [categories[0]]
+    values_closed = values + [values[0]]
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatterpolar(
+        r=values_closed,
+        theta=categories_closed,
+        fill='toself',
+        fillcolor='rgba(56, 189, 248, 0.16)',
+        line=dict(color='#38bdf8', width=2.5),
+        marker=dict(size=7, color='#38bdf8', symbol='circle'),
+        name='SK-VDD-001 Risk',
+        hovertemplate="<b>%{theta}</b><br>Score: %{r}/100<extra></extra>"
+    ))
+
+    fig.update_layout(
+        polar=dict(
+            radialaxis=dict(
+                visible=True,
+                range=[0, 100],
+                tickvals=[25, 50, 75, 100],
+                tickfont=dict(size=9, color=FONT_MUTED),
+                gridcolor="rgba(255,255,255,0.08)",
+                linecolor="rgba(255,255,255,0.12)",
+            ),
+            angularaxis=dict(
+                tickfont=dict(size=11, color=FONT_COLOR, family=FONT_FAMILY),
+                gridcolor="rgba(255,255,255,0.08)",
+                linecolor="rgba(255,255,255,0.12)",
+            ),
+            bgcolor="rgba(0,0,0,0)",
+        ),
+        paper_bgcolor=BG_TRANSPARENT,
+        plot_bgcolor=BG_TRANSPARENT,
+        height=320,
+        margin=dict(t=35, b=35, l=45, r=45),
+        showlegend=False,
+    )
+    return fig
+
+
+# ── 3. Single Dimension Mini Gauge ───────────────────────────────────────────
+
+def plot_gauge(score: float, title: str = "Risk Score", accent_color: str = None) -> go.Figure:
+    score = max(0.0, min(float(score), 100.0))
+    label, default_color = _get_tier_info(score)
+    color = accent_color or default_color
 
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=score,
         number=dict(
-            font=dict(family="JetBrains Mono, monospace", size=36, color=needle),
+            font=dict(family="JetBrains Mono, monospace", size=34, color=color),
         ),
         title=dict(
             text=f"<b>{title}</b>",
@@ -124,16 +196,16 @@ def plot_gauge(score: float, title: str = "Risk Score",
                 range=[0, 100],
                 tickwidth=0,
                 tickfont=dict(color=FONT_MUTED, size=9, family=FONT_FAMILY),
-                tickvals=[0, 50, 100],
+                tickvals=[0, 25, 50, 75, 100],
                 showticklabels=True,
             ),
-            bgcolor="rgba(0,0,0,0)",
-            borderwidth=0,
+            bgcolor="rgba(255,255,255,0.02)",
+            borderwidth=1,
+            bordercolor="rgba(255,255,255,0.06)",
             steps=GAUGE_STEPS,
-            bar=dict(color=needle, thickness=0.08,
-                     line=dict(color="rgba(0,0,0,0)", width=0)),
+            bar=dict(color=color, thickness=0.08),
             threshold=dict(
-                line=dict(color=needle, width=3),
+                line=dict(color=color, width=3),
                 thickness=0.82,
                 value=score,
             ),
@@ -142,73 +214,74 @@ def plot_gauge(score: float, title: str = "Risk Score",
 
     fig.add_annotation(
         x=0.5, y=0.08,
-        text=f'<span style="font-size:10px;color:{FONT_MUTED};letter-spacing:1.5px;">{label} RISK</span>',
+        text=f'<span style="font-size:10px;color:{FONT_MUTED};letter-spacing:1.2px;">{label}</span>',
         showarrow=False, xref="paper", yref="paper",
     )
 
     fig.update_layout(**_base_layout(
-        # KEY FIX: tall enough so number + label + arc never overlap
-        height=260,
-        margin=dict(t=45, b=45, l=30, r=30),
+        height=250,
+        margin=dict(t=40, b=40, l=25, r=25),
     ))
     return fig
 
-# ── All 5 individual gauges ───────────────────────────────────────────────────
+
 def plot_all_risk_gauges(risk_scores: dict) -> dict:
     label_map = {
-        "financial":  "Financial",
-        "reputation": "Reputation",
-        "key_person": "Key Person",
-        "cyber":      "Cyber",
-        "compliance": "Compliance",
+        "financial": ("Financial Viability (30%)", "#10b981"),
+        "reputation": ("Reputational Risk (20%)", "#38bdf8"),
+        "key_person": ("Key-Person Risk (20%)", "#c084fc"),
+        "cyber": ("Tech & Cyber (20%)", "#f59e0b"),
+        "compliance": ("Compliance (10%)", "#f43f5e"),
     }
     charts = {}
-    for key, value in risk_scores.items():
-        label = label_map.get(key, key.capitalize())
-        color = CATEGORY_COLORS.get(label, "#ffffff")
-        fig   = plot_gauge(float(value), f"{label} Risk", accent_color=color)
-        charts[key] = fig
+    for key, (label, color) in label_map.items():
+        val = risk_scores.get(key, 20)
+        charts[key] = plot_gauge(float(val), label, accent_color=color)
     return charts
 
-# ── Donut pie ────────────────────────────────────────────────────────────────
+
+# ── 4. Donut Chart ────────────────────────────────────────────────────────────
+
 def plot_overall_risk_pie(risk_scores: dict) -> go.Figure:
-    labels = ["Financial", "Reputation", "Key Person", "Cyber", "Compliance"]
+    labels = ["Financial (30%)", "Reputation (20%)", "Key Person (20%)", "Cyber (20%)", "Compliance (10%)"]
     values = [
-        risk_scores.get("financial",  50),
-        risk_scores.get("reputation", 50),
-        risk_scores.get("key_person", 50),
-        risk_scores.get("cyber",      50),
-        risk_scores.get("compliance", 50),
+        risk_scores.get("financial", 20),
+        risk_scores.get("reputation", 20),
+        risk_scores.get("key_person", 20),
+        risk_scores.get("cyber", 20),
+        risk_scores.get("compliance", 20),
     ]
-    colors = [CATEGORY_COLORS[l] for l in labels]
+    colors = ["#10b981", "#38bdf8", "#c084fc", "#f59e0b", "#f43f5e"]
 
     fig = go.Figure(go.Pie(
         labels=labels,
         values=values,
-        hole=0.62,
-        marker=dict(colors=colors, line=dict(color="#0b0f1a", width=3)),
+        hole=0.64,
+        marker=dict(colors=colors, line=dict(color="#080c14", width=2.5)),
         textinfo="label+percent",
         textposition="outside",
         textfont=dict(family=FONT_FAMILY, size=11, color=FONT_COLOR),
-        hovertemplate="<b>%{label}</b><br>Score: %{value}<br>Share: %{percent}<extra></extra>",
-        pull=[0.03] * 5,
+        hovertemplate="<b>%{label}</b><br>Score: %{value}/100<br>Proportion: %{percent}<extra></extra>",
+        pull=[0.02] * 5,
         rotation=90,
     ))
 
-    total = sum(values)
+    avg_score = int(sum(values) / len(values)) if values else 20
+    _, needle = _get_tier_info(avg_score)
+
     fig.add_annotation(
         x=0.5, y=0.5,
         text=(
             f'<span style="font-family:JetBrains Mono,monospace;font-size:26px;'
-            f'font-weight:700;color:#e8f0fe;">{total}</span>'
-            f'<br><span style="font-size:10px;color:{FONT_MUTED};letter-spacing:1.5px;">TOTAL SCORE</span>'
+            f'font-weight:700;color:{needle};">{avg_score}</span>'
+            f'<br><span style="font-size:9px;color:{FONT_MUTED};letter-spacing:1.2px;">AVERAGE SCORE</span>'
         ),
         showarrow=False, xref="paper", yref="paper", align="center",
     )
 
     fig.update_layout(**_base_layout(
         height=320,
-        margin=dict(t=40, b=40, l=20, r=120),
+        margin=dict(t=35, b=35, l=15, r=110),
         showlegend=True,
         legend=dict(
             orientation="v", x=1.02, y=0.5, xanchor="left",
@@ -216,19 +289,9 @@ def plot_overall_risk_pie(risk_scores: dict) -> go.Figure:
             bgcolor="rgba(0,0,0,0)",
         ),
         title=dict(
-            text="<b>Risk Distribution</b>",
-            font=dict(family=FONT_FAMILY, size=14, color=FONT_MUTED),
+            text="<b>Risk Dimension Proportions</b>",
+            font=dict(family=FONT_FAMILY, size=13, color=FONT_MUTED),
             x=0.5, xanchor="center",
         ),
     ))
     return fig
-
-# ── Legacy compat ─────────────────────────────────────────────────────────────
-def plot_pie_chart(df: pd.DataFrame) -> go.Figure:
-    return plot_overall_risk_pie({
-        "financial":  df[df["Risk Type"] == "Financial"]["Score"].values[0]  if len(df) > 0 else 50,
-        "reputation": df[df["Risk Type"] == "Reputation"]["Score"].values[0] if len(df) > 1 else 50,
-        "key_person": df[df["Risk Type"] == "Key Person"]["Score"].values[0] if len(df) > 2 else 50,
-        "cyber":      df[df["Risk Type"] == "Cyber"]["Score"].values[0]      if len(df) > 3 else 50,
-        "compliance": df[df["Risk Type"] == "Compliance"]["Score"].values[0] if len(df) > 4 else 50,
-    })

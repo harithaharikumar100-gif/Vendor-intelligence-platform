@@ -88,20 +88,14 @@ def _fmt(v, kind="money"):
 
 
 def _groq(prompt: str, max_tokens: int = 150) -> str:
-    """Call Groq with a short prompt; returns stripped text or ''."""
+    """Call Groq with a short prompt using resilient multi-tier fallback ladder."""
     try:
-        from groq import Groq
-        client = Groq(api_key=os.getenv("GROQ_API_KEY", ""))
-        resp = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,
-            max_tokens=max_tokens,
-        )
-        return (resp.choices[0].message.content or "").strip()
+        from ai_engine import _groq as _ai_groq
+        return _ai_groq(prompt, max_tokens=max_tokens).strip()
     except Exception as e:
-        print(f"  ⚠  Groq: {e}")
+        print(f"  ⚠  Groq fallback: {e}")
         return ""
+
 
 
 # ─── ticker lookup ────────────────────────────────────────────────────────────

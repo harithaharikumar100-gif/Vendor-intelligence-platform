@@ -6,3 +6,5 @@ reportlab
 yfinance
 requests
 python-dotenv
+fastapi
+uvicorn

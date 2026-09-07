@@ -1,7 +1,7 @@
-# VendorIQ 🛡️
-**AI-powered vendor due diligence and risk scoring platform.**
+# DRiskify 🛡️ (NIVETA Platform)
+**AI-Native Vendor Due Diligence & Risk Intelligence Platform (SK-VDD-001)**
 
-VendorIQ scores vendors across 5 risk dimensions in parallel — financial, reputation, cyber, compliance, and key person — using live web intelligence, real-time financial data, and an LLM synthesis layer. Results are displayed in a dark-themed Streamlit dashboard and exportable as a PDF report.
+DRiskify autonomously scores vendors across 5 risk dimensions in parallel — **Financial Viability (30%)**, **Reputational Risk (20%)**, **Key-Person & Governance (20%)**, **Technology & Cyber (20%)**, and **Regulatory Compliance (10%)** — using public intelligence from authoritative Canadian and international registries, live balance sheet metrics, and a dynamic Groq LLM synthesis layer.
 
 ---
 
@@ -9,122 +9,76 @@ VendorIQ scores vendors across 5 risk dimensions in parallel — financial, repu
 
 ```
 vendoriq/
-├── app.py                # Streamlit UI — dashboard, charts, PDF download
-├── services.py           # Orchestration — runs scrape + financials in parallel, applies keyword boosts
-├── ai_engine.py          # Groq LLM calls — per-category risk prompts + synthesis
-├── scraper.py            # Serper-based web scraping — 5 risk categories + company profile
-├── financial_fetcher.py  # Financial data — yfinance (listed) + web scrape (private) + CEO extraction
-├── charts.py             # Plotly gauges + donut chart
-├── pdf_generator.py      # ReportLab PDF with two-pass page numbering
-└── .env                  # API keys (not committed)
+├── frontend/             # Modern React 18 + Tailwind CSS + Recharts Web UI
+│   ├── src/
+│   │   ├── components/   # RadarChart, GaugeMeter, DimensionCard, EscalationBanner
+│   │   ├── App.jsx       # Hero search, quick presets, 5-dimension tabs, export
+│   │   └── index.css     # Glassmorphism & dark-theme tokens
+│   ├── package.json
+│   └── vite.config.js
+├── server.py             # FastAPI REST backend (serves /api and static build)
+├── run_platform.py       # Unified platform launcher
+├── services.py           # Orchestration — SK-VDD-001 scoring math & 4-tier rating
+├── ai_engine.py          # Groq dynamic model discovery + Signal Library synthesis
+├── scraper.py            # Parallel scraping: SEDAR+, CBCA, CBC, Globe & Mail, CCCS, CISA, CanLII
+├── normalizer.py         # Suffix stripping, acronym expansion & BN validation
+├── financial_fetcher.py  # yfinance & public filing ratio extraction
+├── charts.py             # Plotly charts (Radar, Gauges, Donut)
+├── pdf_generator.py      # Official SK-VDD-001 PDF Summary Report generator
+├── app.py                # (Optional) Legacy Streamlit UI
+└── .env                  # API keys (GROQ_API_KEY, SERPER_API_KEY)
 ```
 
 ---
 
-## How It Works
+## 5 Risk Dimensions (SK-VDD-001)
 
-1. **Scrape** (`scraper.py`) — fires 12 parallel Serper queries across 5 risk categories + company profile
-2. **Financials** (`financial_fetcher.py`) — runs concurrently with scraping:
-   - Listed companies → yfinance (revenue, EPS, D/E, ROCE, market cap, etc.)
-   - Private/unlisted → web scrape + Groq fallback
-   - CEO extraction: company website → Wikipedia → press → Groq
-3. **AI Analysis** (`ai_engine.py`) — 5 category prompts + 1 synthesis prompt, all parallelized via `ThreadPoolExecutor`
-4. **Keyword Boost** (`services.py`) — bumps scores for confirmed high-signal terms (e.g. "ransomware", "regulatory fine")
-5. **Display** (`app.py`) — renders KPI cards, gauges, risk cards with evidence links, and company profile
-
----
-
-## Risk Categories
-
-| Category | Weight | Focus Areas |
-|---|---|---|
-| Financial | 25% | Revenue decline, EPS, debt/equity, bankruptcy, layoffs |
-| Cyber | 25% | Data breaches, ransomware, exposed databases |
-| Reputation | 20% | Lawsuits, scandals, public backlash |
-| Compliance | 15% | Regulatory fines, GDPR, sanctions, government investigations |
-| Key Person | 15% | CEO/founder exits, leadership instability |
+| Dimension | Weight | Primary Sources | Focus & Thresholds |
+|---|---|---|---|
+| **Financial Viability** | **30%** | SEDAR+, CBCA, Provincial Registries, CRA, yfinance | Solvency ($D/E > 3.0x$), Liquidity (Current Ratio $< 1.0$), EBITDA trends, Going-concern opinions |
+| **Reputational Risk** | **20%** | CBC News, Globe & Mail, Financial Post, Google News, CanLII | Trailing 36m adverse media, 2.0x 12m recency multiplier, Tier-1 Canadian outlets, litigation |
+| **Key-Person Risk** | **20%** | SEDI Insiders, LinkedIn, CBCA Registry, OFAC/OSFI Sanctions | Sanctions match, PEP, director disqualifications, single-person dependency, thin bench |
+| **Technology & Cyber** | **20%** | CCCS (`cyber.gc.ca`), CISA KEV, NVD ($CVSS \ge 7.0$), HaveIBeenPwned | Confirmed breaches (past 3y), active CVEs, ransomware, BitSight indicators, exposed assets |
+| **Regulatory Compliance** | **10%** | OSFI, FINTRAC AMPs, CSA, OPC PIPEDA, CRTC CASL | Enforcement orders, AMP penalties $> \$100\text{k CAD}$, cease-trade orders. Active prohibition triggers Critical |
 
 ---
 
-## Setup
+## 4-Tier Rating Bands
 
-### 1. Clone
-```bash
-git clone https://github.com/harithaharikumar100/vendor-intelligence-platform.git
-cd vendor-intelligence-platform
-```
+- **0 – 24**: 🟢 **Low** — *No material concerns detected. Standard onboarding may proceed.*
+- **25 – 49**: 🟡 **Medium** — *Some risk signals present. Enhanced due diligence recommended.*
+- **50 – 74**: 🟠 **High** — *Significant risk signals. Senior review and conditional onboarding.*
+- **75 – 100**: 🔴 **Critical** — *Severe risk signals. Escalation required; onboarding suspended.*
 
-### 2. Create virtual environment
-```bash
-python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
-```
+---
 
-### 3. Install dependencies
-```bash
-pip install -r requirements.txt
-```
+## Quick Start
 
-### 4. Create `.env`
+### 1. Configure `.env`
 ```env
 GROQ_API_KEY=your_groq_api_key
 SERPER_API_KEY=your_serper_api_key
 ```
 
-### 5. Run
+### 2. Launch the Web Platform
+Run the unified launcher:
 ```bash
-streamlit run app.py
+python run_platform.py
+```
+Open **`http://localhost:8000`** in your browser.
+
+*(Optional for Vite Dev server during active UI development)*:
+```bash
+cd frontend
+npm run dev
 ```
 
 ---
 
-## Tech Stack
-
-| Layer | Technology |
-|---|---|
-| UI | Streamlit |
-| AI Model | Groq — `llama-3.3-70b-versatile` |
-| Web Search | Serper API |
-| Financial Data | yfinance (listed) / web scrape (private) |
-| Charts | Plotly |
-| PDF Export | ReportLab (two-pass canvas for page numbering) |
-| Parallelism | `concurrent.futures.ThreadPoolExecutor` |
-
----
-
-## Requirements
-
-```
-streamlit
-groq
-plotly
-pandas
-reportlab
-yfinance
-requests
-python-dotenv
-```
-
----
-
-## Environment Variables
-
-| Variable | Required | Description |
-|---|---|---|
-| `GROQ_API_KEY` | ✅ | Groq API key for LLM inference |
-| `SERPER_API_KEY` | ✅ | Serper API key for web search |
-
----
-
-## Notes
-
-- PDF reports are generated locally and not committed (see `.gitignore`)
-- The SSL adapter in `scraper.py` and `financial_fetcher.py` handles Windows SSL EOF errors
-- Data confidence score (20–95%) reflects evidence hit count + whether financial metrics were found
-
----
-
-
-## License
-
-Proprietary. Do not distribute without permission.
+## Automatic Escalation Triggers (Section 10.1)
+The platform automatically flags senior risk review escalations for:
+1. Overall Vendor Risk Score $\ge 75$ (Critical rating)
+2. Match on OFAC / OSFI / UN / EU sanctions list
+3. Going-concern opinion in audited statements
+4. Confirmed data breach within past 12 months
+5. Active regulatory prohibition or cease-and-desist order
