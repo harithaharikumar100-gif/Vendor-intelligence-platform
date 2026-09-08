@@ -138,6 +138,8 @@ def health():
     return {
         "status": "healthy",
         "groq_configured": bool(os.getenv("GROQ_API_KEY")),
+        "gemini_configured": bool(os.getenv("GEMINI_API_KEY")),
+        "openai_configured": bool(os.getenv("OPENAI_API_KEY")),
         "serper_configured": bool(os.getenv("SERPER_API_KEY")),
         "skill_id": "SK-VDD-001",
         "platform": "DRiskify - NIVETA"
