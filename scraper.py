@@ -2,13 +2,13 @@
 scraper.py - Multi-Source Web Intelligence Scraper (SK-VDD-001 Section 5)
 --------------------------------------------------------------------------
 Features:
+- Windows cp1252 safe logging
 - Queries authoritative Canadian & Global intelligence sources:
-  * Financial: SEDAR+, CBCA, Provincial Registries, CRA, D&B indicators
-  * Reputational: CBC, Globe and Mail, National Post, Financial Post, Google News, CanLII
-  * Key-Person: LinkedIn, SEDAR+ insiders, OFAC/OSFI Sanctions, CanLII litigation
-  * Tech & Cyber: CCCS (cyber.gc.ca), CISA KEV, NVD, HaveIBeenPwned, BitSight
+  * Financial: SEDAR+, CBCA, Provincial Registries, CRA, D&B indicators, financial distress
+  * Reputational: CBC, Globe and Mail, National Post, Financial Post, Google News, CanLII court cases
+  * Key-Person: LinkedIn, SEDAR+ insiders, OFAC/OSFI Sanctions, CanLII litigation, executive exits
+  * Tech & Cyber: CCCS (cyber.gc.ca), CISA KEV, NVD, HaveIBeenPwned, BitSight, CVEs, ransomware
   * Compliance: OSFI, FINTRAC AMPs, CSA Enforcement, OPC PIPEDA, CRTC CASL, Competition Bureau
-- 36-Month Lookback Window & Recency Filtering
 - In-memory query caching to optimize performance & conserve API quotas
 """
 
@@ -27,6 +27,16 @@ CURRENT_YEAR = 2026
 MIN_LOOKBACK_YEAR = 2023  # 36-month lookback per SK-VDD-001 Section 2.2
 
 _SERPER_CACHE = {}
+
+
+def _safe_print(msg: str):
+    try:
+        print(msg)
+    except Exception:
+        try:
+            print(msg.encode("ascii", errors="replace").decode("ascii"))
+        except Exception:
+            pass
 
 
 class SSLAdapter(HTTPAdapter):
@@ -72,7 +82,7 @@ def _serper(query: str, num: int = 5) -> list:
         else:
             return []
     except Exception as e:
-        print(f"  ⚠ Serper query failed [{query[:45]}]: {e}")
+        _safe_print(f"  [!] Serper query failed [{query[:45]}]: {e}")
         return []
 
 
@@ -80,43 +90,45 @@ def _serper(query: str, num: int = 5) -> list:
 SEARCH_QUERIES = {
     "financial": [
         '"{vendor}" (site:sedarplus.ca OR "SEDAR+" OR "annual report" OR "MD&A" OR "audited financial") 2024 OR 2025 OR 2026',
-        '"{vendor}" (solvency OR liquidity OR "debt-to-equity" OR "retained earnings" OR bankruptcy OR restructuring OR layoffs) 2024 OR 2025 OR 2026',
-        '"{vendor}" ("credit rating" OR DBRS OR S&P OR Moody OR "going-concern" OR "material weakness") 2024 OR 2025 OR 2026',
+        '"{vendor}" (solvency OR liquidity OR "debt-to-equity" OR "retained earnings" OR bankruptcy OR restructuring OR layoffs OR loss) 2024 OR 2025 OR 2026',
+        '"{vendor}" ("credit rating" OR DBRS OR S&P OR Moody OR "going-concern" OR "material weakness" OR "default") 2024 OR 2025 OR 2026',
     ],
     "reputation": [
         '"{vendor}" (site:cbc.ca OR site:theglobeandmail.com OR site:nationalpost.com OR site:financialpost.com) (controversy OR fraud OR lawsuit OR scandal OR investigation) 2024 OR 2025 OR 2026',
-        '"{vendor}" (site:canlii.org OR "court records" OR "class action" OR settlement OR misconduct OR penalty) 2024 OR 2025 OR 2026',
-        '"{vendor}" (lawsuit OR controversy OR fraud OR scandal OR "adverse media") 2024 OR 2025 OR 2026',
+        '"{vendor}" (site:canlii.org OR "court records" OR "class action" OR settlement OR misconduct OR penalty OR litigation) 2024 OR 2025 OR 2026',
+        '"{vendor}" (lawsuit OR controversy OR fraud OR scandal OR "adverse media" OR dispute OR boycott) 2024 OR 2025 OR 2026',
     ],
     "key_person": [
-        '"{vendor}" ("CEO" OR founder OR "executive departure" OR "resigned" OR "appointed" OR "board of directors") 2024 OR 2025 OR 2026',
+        '"{vendor}" ("CEO" OR founder OR "executive departure" OR "resigned" OR "appointed" OR "board of directors" OR "management") 2024 OR 2025 OR 2026',
         '"{vendor}" (site:sedarplus.ca OR "SEDI" OR "insider filings" OR "management information circular") (officer OR director OR insider)',
-        '"{vendor}" ("OSFI sanctions" OR "OFAC" OR "PEP" OR "disqualified director" OR "director ban" OR "criminal record") 2024 OR 2025 OR 2026',
+        '"{vendor}" ("OSFI sanctions" OR "OFAC" OR "PEP" OR "disqualified director" OR "director ban" OR "criminal record" OR "fraud") 2024 OR 2025 OR 2026',
     ],
     "cyber": [
-        '"{vendor}" (site:cyber.gc.ca OR "CCCS" OR "Canadian Centre for Cyber Security" OR "CISA" OR "advisory") 2024 OR 2025 OR 2026',
-        '"{vendor}" ("data breach" OR ransomware OR "cyber attack" OR "exposed database" OR HaveIBeenPwned OR BitSight) 2024 OR 2025 OR 2026',
-        '"{vendor}" (CVE OR "vulnerability" OR "CVSS" OR "unpatched" OR "supply chain attack") 2024 OR 2025 OR 2026',
+        '"{vendor}" (site:cyber.gc.ca OR "CCCS" OR "Canadian Centre for Cyber Security" OR "CISA" OR "advisory" OR "vulnerability") 2024 OR 2025 OR 2026',
+        '"{vendor}" ("data breach" OR ransomware OR "cyber attack" OR "exposed database" OR HaveIBeenPwned OR BitSight OR leak) 2024 OR 2025 OR 2026',
+        '"{vendor}" (CVE OR "vulnerability" OR "CVSS" OR "unpatched" OR "supply chain attack" OR outage) 2024 OR 2025 OR 2026',
     ],
     "compliance": [
-        '"{vendor}" ("OSFI" OR "FINTRAC" OR "administrative monetary penalty" OR "AMP" OR "AML/ATF") 2024 OR 2025 OR 2026',
-        '"{vendor}" ("CSA enforcement" OR "securities commission" OR "OSC" OR "BCSC" OR "AMF" OR "cease-trade") 2024 OR 2025 OR 2026',
-        '"{vendor}" ("Office of the Privacy Commissioner" OR "PIPEDA" OR "CRTC" OR "CASL" OR "Competition Bureau") 2024 OR 2025 OR 2026',
+        '"{vendor}" ("OSFI" OR "FINTRAC" OR "administrative monetary penalty" OR "AMP" OR "AML/ATF" OR enforcement) 2024 OR 2025 OR 2026',
+        '"{vendor}" ("CSA enforcement" OR "securities commission" OR "OSC" OR "BCSC" OR "AMF" OR "cease-trade" OR penalty) 2024 OR 2025 OR 2026',
+        '"{vendor}" ("Office of the Privacy Commissioner" OR "PIPEDA" OR "CRTC" OR "CASL" OR "Competition Bureau" OR violation) 2024 OR 2025 OR 2026',
     ],
 }
 
 PROFILE_QUERIES = [
     '"{vendor}" ("Corporations Canada" OR CBCA OR "headquarters" OR "founded" OR "CEO" OR "about us")',
     '"{vendor}" (site:crunchbase.com OR site:wikipedia.org OR site:linkedin.com) overview company profile',
+    '"{vendor}" corporate headquarters founder established employees',
 ]
 
 
 def _stale(r: dict) -> bool:
-    """Enforces 36-month lookback window (SK-VDD-001 Section 2.2)."""
+    """Enforces 36-month lookback window on risk incidents."""
     txt = f"{r.get('date', '')} {r.get('title', '')} {r.get('snippet', '')}".lower()
-    for yr in range(2015, MIN_LOOKBACK_YEAR):
-        if str(yr) in txt and not any(str(y) in txt for y in range(MIN_LOOKBACK_YEAR, CURRENT_YEAR + 1)):
-            return True
+    # If the snippet is strictly about pre-2023 events and mentions no recent years
+    has_recent = any(str(y) in txt for y in range(MIN_LOOKBACK_YEAR, CURRENT_YEAR + 1))
+    if not has_recent and any(str(yr) in txt for yr in range(2010, MIN_LOOKBACK_YEAR)):
+        return True
     return False
 
 
@@ -175,7 +187,7 @@ def collect_vendor_signals(vendor: str, industry: str = "", country: str = "Cana
     vendor_variants = norm["variants"]
     domain_hint = extract_domain(company_url)
 
-    print(f"\n📡 SK-VDD-001 Intelligence Sweep: {vendor_clean} (Raw: {vendor}) | Scope: {country}")
+    _safe_print(f"  [+] SK-VDD-001 Intelligence Sweep: {vendor_clean} (Raw: {vendor}) | Scope: {country}")
     context = {}
 
     with ThreadPoolExecutor(max_workers=6) as ex:

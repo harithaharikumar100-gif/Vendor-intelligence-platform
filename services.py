@@ -11,8 +11,10 @@ Features:
   * 75 - 100: Critical (Red) - Escalation required; onboarding to be suspended
 - Automatic Escalation Trigger Detection (Section 10.1)
 - Canonical Structured Output Generation (Section 8)
+- Windows cp1252 safe logging
 """
 
+import os
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 from normalizer import normalize_vendor_name
@@ -60,6 +62,16 @@ RATING_BANDS = {
 }
 
 
+def _safe_print(msg: str):
+    try:
+        print(msg)
+    except Exception:
+        try:
+            print(msg.encode("ascii", errors="replace").decode("ascii"))
+        except Exception:
+            pass
+
+
 def get_risk_tier(score: float) -> tuple:
     """Maps score to SK-VDD-001 4-tier rating band."""
     s = int(round(score))
@@ -82,7 +94,7 @@ def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada"
         norm = normalize_vendor_name(vendor)
         clean_vendor = norm["normalized_name"]
 
-        print(f"\n🚀 Phase 1: Parallel Scrape & Financial Ingestion: {clean_vendor} ({country})")
+        _safe_print(f"\n[+] Phase 1: Ingesting Signals & Financials for {clean_vendor} ({country})...")
 
         def _scrape():
             return collect_vendor_signals(
@@ -107,11 +119,10 @@ def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada"
             data = sf.result()
             financial_metrics, prof_extras = ff.result()
 
-        prof_extras.pop("description", None)
         if not isinstance(data, dict):
             data = {}
 
-        # Inject authoritative profile data
+        # Inject structured profile into context
         existing_profile = data.get("profile", {})
         if not isinstance(existing_profile, dict):
             existing_profile = {}
@@ -137,6 +148,7 @@ def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada"
             data["profile"]["has_structured"] = True
 
         # Phase 2: Gen-AI Risk Synthesis & Signal Classification
+        _safe_print(f"[+] Phase 2: AI Multi-Dimension Synthesis for {clean_vendor}...")
         result = analyze_vendor_full(
             clean_vendor, data,
             country=country,
@@ -146,9 +158,9 @@ def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada"
         )
         if not isinstance(result, dict):
             result = {}
-        result.setdefault("risk_scores", {k: 20 for k in RISK_CATEGORIES})
+        result.setdefault("risk_scores", {k: 25 for k in RISK_CATEGORIES})
 
-        # Phase 3: Patch Company Profile
+        # Phase 3: Patch Company Profile with authoritative fields
         cp = result.get("company_profile", {})
         if not isinstance(cp, dict):
             cp = {}
@@ -161,16 +173,21 @@ def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada"
             elif str(cp.get(field, "")).strip().lower() in INVALID:
                 cp[field] = "Not Available"
 
+        if financial_metrics:
+            cp["financial_metrics"] = {
+                k: v for k, v in financial_metrics.items() if v not in (None, "", "N/A", "Not Available")
+            }
+
         result["company_profile"] = cp
 
         # Phase 4: Compute Exact SK-VDD-001 Weighted Score (Section 7.2)
         scores = result["risk_scores"]
         overall = int(round(
-            scores.get("financial", 20) * WEIGHTS["financial"] +
-            scores.get("reputation", 20) * WEIGHTS["reputation"] +
-            scores.get("key_person", 20) * WEIGHTS["key_person"] +
-            scores.get("cyber", 20) * WEIGHTS["cyber"] +
-            scores.get("compliance", 20) * WEIGHTS["compliance"]
+            scores.get("financial", 25) * WEIGHTS["financial"] +
+            scores.get("reputation", 25) * WEIGHTS["reputation"] +
+            scores.get("key_person", 25) * WEIGHTS["key_person"] +
+            scores.get("cyber", 25) * WEIGHTS["cyber"] +
+            scores.get("compliance", 25) * WEIGHTS["compliance"]
         ))
         overall = max(0, min(overall, 100))
 
@@ -195,34 +212,34 @@ def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada"
         result["query_date"] = datetime.utcnow().strftime("%Y-%m-%d")
 
         # Canonical Section 8 Schema Aliases
-        result["fin_risk_score"] = scores.get("financial", 20)
+        result["fin_risk_score"] = scores.get("financial", 25)
         result["fin_risk_signals"] = result.get("explanations", {}).get("financial", {}).get("signals", [])
-        result["rep_risk_score"] = scores.get("reputation", 20)
+        result["rep_risk_score"] = scores.get("reputation", 25)
         result["rep_risk_articles"] = result.get("explanations", {}).get("reputation", {}).get("articles", [])
-        result["kp_risk_score"] = scores.get("key_person", 20)
+        result["kp_risk_score"] = scores.get("key_person", 25)
         result["kp_persons"] = result.get("explanations", {}).get("key_person", {}).get("persons", [])
-        result["tech_cyber_score"] = scores.get("cyber", 20)
+        result["tech_cyber_score"] = scores.get("cyber", 25)
         result["tech_cyber_signals"] = result.get("explanations", {}).get("cyber", {}).get("signals", [])
-        result["compliance_score"] = scores.get("compliance", 20)
+        result["compliance_score"] = scores.get("compliance", 25)
         result["compliance_signals"] = result.get("explanations", {}).get("compliance", {}).get("signals", [])
 
         # Data Confidence Score (SK-VDD-001 Section 11)
         total_hits = result.get("total_hits", 0)
         has_metrics = bool(financial_metrics)
         confidence = (
-            30 if total_hits == 0 and not has_metrics else
-            55 if total_hits < 5 else
-            80 if total_hits < 15 else 95
+            40 if total_hits == 0 and not has_metrics else
+            65 if total_hits < 5 else
+            85 if total_hits < 15 else 95
         )
         if has_metrics:
             confidence = min(confidence + 5, 98)
         result["confidence_score"] = confidence
 
-        print(f"\n📊 Overall Score: {overall} ({tier_name} - {tier_meta['traffic_light']}) | {scores}")
+        _safe_print(f"\n[+] Due Diligence Complete: Overall Score: {overall} ({tier_name} - {tier_meta['traffic_light']}) | {scores}")
         return result, data
 
     except Exception as e:
         import traceback
-        print(f"❌ SYSTEM ERROR in services.py: {e}")
+        _safe_print(f"[!] SYSTEM ERROR in services.py: {e}")
         traceback.print_exc()
         return {"error": str(e)}, {}

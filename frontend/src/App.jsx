@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import {
   Shield, Search, Download, FileText, CheckCircle2, AlertTriangle,
   Building2, Globe, TrendingUp, Key, Cpu, Scale, ChevronRight,
-  ExternalLink, Sparkles, Filter, RefreshCw, Layers, ListChecks
+  ExternalLink, Sparkles, Filter, RefreshCw, Layers, ListChecks,
+  Users, Clock
 } from 'lucide-react';
 
 import GaugeMeter from './components/GaugeMeter';
@@ -382,6 +383,63 @@ export default function App() {
                   rating={result.overall_risk_rating}
                   traffic={result.traffic_light}
                 />
+              </div>
+            </div>
+
+            {/* Entity Intelligence Quick Bar */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+              <div className="bg-surface p-3.5 rounded-xl border border-border flex flex-col justify-between">
+                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider flex items-center gap-1.5">
+                  <Key size={12} className="text-purple-400" /> Executive Leadership
+                </span>
+                <span className="text-xs font-bold text-white mt-1.5 truncate" title={result.company_profile?.ceo}>
+                  {result.company_profile?.ceo || 'Not Available'}
+                </span>
+              </div>
+
+              <div className="bg-surface p-3.5 rounded-xl border border-border flex flex-col justify-between">
+                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider flex items-center gap-1.5">
+                  <Building2 size={12} className="text-sky-400" /> Corporate Founder
+                </span>
+                <span className="text-xs font-bold text-white mt-1.5 truncate" title={result.company_profile?.founder}>
+                  {result.company_profile?.founder || 'Not Available'}
+                </span>
+              </div>
+
+              <div className="bg-surface p-3.5 rounded-xl border border-border flex flex-col justify-between">
+                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider flex items-center gap-1.5">
+                  <Clock size={12} className="text-emerald-400" /> Incorporated
+                </span>
+                <span className="text-xs font-bold text-white mt-1.5">
+                  {result.company_profile?.founded || 'Not Available'}
+                </span>
+              </div>
+
+              <div className="bg-surface p-3.5 rounded-xl border border-border flex flex-col justify-between">
+                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider flex items-center gap-1.5">
+                  <Globe size={12} className="text-amber-400" /> Headquarters
+                </span>
+                <span className="text-xs font-bold text-white mt-1.5 truncate" title={result.company_profile?.headquarters}>
+                  {result.company_profile?.headquarters || 'Not Available'}
+                </span>
+              </div>
+
+              <div className="bg-surface p-3.5 rounded-xl border border-border flex flex-col justify-between">
+                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider flex items-center gap-1.5">
+                  <Users size={12} className="text-indigo-400" /> Est. Employees
+                </span>
+                <span className="text-xs font-bold text-white mt-1.5">
+                  {result.company_profile?.employees ? `${result.company_profile.employees}` : 'Not Available'}
+                </span>
+              </div>
+
+              <div className="bg-surface p-3.5 rounded-xl border border-border flex flex-col justify-between">
+                <span className="text-[10px] uppercase font-bold text-slate-400 tracking-wider flex items-center gap-1.5">
+                  <TrendingUp size={12} className="text-emerald-400" /> Annual Revenue
+                </span>
+                <span className="text-xs font-bold font-mono text-emerald-400 mt-1.5 truncate">
+                  {result.company_profile?.financial_metrics?.revenue || 'Private / Unlisted'}
+                </span>
               </div>
             </div>
 
