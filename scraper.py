@@ -14,6 +14,7 @@ Features:
 
 import os
 import re
+import time
 import requests
 import ssl
 from requests.adapters import HTTPAdapter
@@ -49,7 +50,7 @@ class SSLAdapter(HTTPAdapter):
 
 
 def _serper(query: str, num: int = 5) -> list:
-    """Performs Serper Google Search with in-memory caching and resilient timeouts."""
+    """Performs Serper Google Search with 3-retry exponential backoff and in-memory caching (SK-VDD-001 Section 10.2)."""
     if not SERPER_API_KEY:
         return []
     
@@ -57,33 +58,46 @@ def _serper(query: str, num: int = 5) -> list:
     if query_key in _SERPER_CACHE:
         return _SERPER_CACHE[query_key]
 
-    try:
-        session = requests.Session()
-        session.mount('https://', SSLAdapter())
-        r = session.post(
-            "https://google.serper.dev/search",
-            json={"q": query, "num": num},
-            headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
-            timeout=12,
-            verify=True
-        )
-        if r.status_code == 200:
-            hits = [
-                {
-                    "title": rc.get("title", ""),
-                    "snippet": rc.get("snippet", ""),
-                    "url": rc.get("link", ""),
-                    "date": rc.get("date", "")
-                }
-                for rc in r.json().get("organic", [])
-            ]
-            _SERPER_CACHE[query_key] = hits
-            return hits
-        else:
+    for attempt in range(3):
+        try:
+            session = requests.Session()
+            session.mount('https://', SSLAdapter())
+            r = session.post(
+                "https://google.serper.dev/search",
+                json={"q": query, "num": num},
+                headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
+                timeout=12,
+                verify=True
+            )
+            if r.status_code == 200:
+                hits = [
+                    {
+                        "title": rc.get("title", ""),
+                        "snippet": rc.get("snippet", ""),
+                        "url": rc.get("link", ""),
+                        "date": rc.get("date", "")
+                    }
+                    for rc in r.json().get("organic", [])
+                ]
+                _SERPER_CACHE[query_key] = hits
+                return hits
+            elif r.status_code in (429, 500, 502, 503) and attempt < 2:
+                backoff = 2 ** attempt  # 1s, 2s
+                _safe_print(f"  [~] Serper retry {attempt+1}/3 for [{query[:45]}] in {backoff}s...")
+                time.sleep(backoff)
+                continue
+            else:
+                return []
+        except Exception as e:
+            if attempt < 2:
+                backoff = 2 ** attempt
+                _safe_print(f"  [~] Serper error retry {attempt+1}/3 [{query[:45]}]: {e} — retrying in {backoff}s...")
+                time.sleep(backoff)
+                continue
+            _safe_print(f"  [!] Serper query failed after 3 retries [{query[:45]}]: {e}")
             return []
-    except Exception as e:
-        _safe_print(f"  [!] Serper query failed [{query[:45]}]: {e}")
-        return []
+
+    return []
 
 
 # SK-VDD-001 Section 5: Authoritative Search Query Templates

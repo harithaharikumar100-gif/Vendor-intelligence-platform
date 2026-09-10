@@ -241,18 +241,45 @@ def _yfinance(ticker: str) -> dict:
         except Exception:
             pass
 
+        # Quick Ratio (Section 6.1.1)
+        quick_ratio = _fmt(info.get("quickRatio"), "f")
+
+        # EBITDA Margin (Section 6.1.1)
+        ebitda_margin = None
+        ebitda = info.get("ebitda")
+        total_rev = info.get("totalRevenue") or info.get("revenue")
+        if ebitda is not None and total_rev:
+            try:
+                ebitda_margin = f"{(float(ebitda) / float(total_rev)) * 100:.2f}%"
+            except Exception:
+                pass
+
+        # Interest Coverage Ratio (Section 6.1.1)
+        interest_coverage = None
+        operating_income = info.get("operatingIncome") or info.get("ebit")
+        interest_expense = info.get("interestExpense")
+        if operating_income is not None and interest_expense is not None:
+            try:
+                ic = float(operating_income) / float(abs(interest_expense))
+                interest_coverage = f"{ic:.2f}x"
+            except Exception:
+                pass
+
         out = {
             "ticker": ticker.upper(),
-            "revenue": _fmt(info.get("totalRevenue") or info.get("revenue")),
+            "revenue": _fmt(total_rev),
             "net_income": _fmt(info.get("netIncomeToCommon")),
             "eps": _fmt(info.get("trailingEps"), "f"),
             "pe_ratio": _fmt(info.get("trailingPE"), "f"),
             "debt_equity": de,
             "net_margin": _fmt(info.get("profitMargins"), "pct"),
             "operating_margin": _fmt(info.get("operatingMargins"), "pct"),
+            "ebitda_margin": ebitda_margin,
+            "interest_coverage": interest_coverage,
             "roce": roce,
             "revenue_growth": _fmt(info.get("revenueGrowth"), "pct"),
             "current_ratio": _fmt(info.get("currentRatio"), "f"),
+            "quick_ratio": quick_ratio,
             "market_cap": _fmt(info.get("marketCap")),
             "employees": employees,
             "headquarters": hq,
@@ -452,8 +479,9 @@ def fetch_financial_and_profile(
     if resolved_ticker:
         yf_data = _yfinance(resolved_ticker)
         for k in ("revenue", "net_income", "eps", "pe_ratio", "debt_equity",
-                  "net_margin", "operating_margin", "roce", "revenue_growth",
-                  "current_ratio", "market_cap", "ticker"):
+                  "net_margin", "operating_margin", "ebitda_margin", "interest_coverage",
+                  "roce", "revenue_growth", "current_ratio", "quick_ratio",
+                  "market_cap", "ticker"):
             if yf_data.get(k):
                 financial_metrics[k] = yf_data[k]
 

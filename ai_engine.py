@@ -509,6 +509,50 @@ def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns=""
             if cat not in cat_results:
                 cat_results[cat] = auto_fallback[cat]
 
+    # 3a. Key-Person Concentration Risk Structural Checks (SK-VDD-001 Section 6.3.3)
+    _kp = cat_results.get("key_person", {})
+    _kp_persons = _kp.get("persons", [])
+    _kp_evidence = data.get("key_person", {}).get("text", "").lower()
+
+    _structural_signals = []
+    _kp_escalation = None
+    # Single-person dependency
+    if len(_kp_persons) <= 1:
+        _structural_signals.append({
+            "name": _kp_persons[0].get("name", "Sole Executive") if _kp_persons else "Unknown",
+            "role": "Key-Person Dependency",
+            "flags": ["Single-person dependency — only one executive identified"],
+            "severity": "Elevated"
+        })
+        _kp["concentration_risk"] = "Elevated"
+    # Thin executive bench (< 3 named executives)
+    if len(_kp_persons) < 3:
+        _structural_signals.append({
+            "name": "Executive Bench",
+            "role": "Governance",
+            "flags": [f"Thin executive bench — only {len(_kp_persons)} executive(s) identified (minimum 3 expected)"],
+            "severity": "Elevated"
+        })
+        if _kp.get("concentration_risk") != "High":
+            _kp["concentration_risk"] = "Elevated"
+    # Recent attrition (2+ C-suite departures in 12 months)
+    _attrition_keywords = ["resigned", "departed", "stepped down", "left the company", "fired", "terminated"]
+    _attrition_count = sum(1 for kw in _attrition_keywords if kw in _kp_evidence)
+    if _attrition_count >= 2:
+        _structural_signals.append({
+            "name": "Recent Attrition",
+            "role": "Governance",
+            "flags": [f"Recent attrition — {_attrition_count} executive departure(s) detected in 12-month lookback"],
+            "severity": "High"
+        })
+        _kp["concentration_risk"] = "High"
+        _kp_escalation = "Key-Person Attrition (2+ C-suite exits in 12 months)"
+
+    if _structural_signals:
+        _kp.setdefault("persons", []).extend(_structural_signals)
+
+    cat_results["key_person"] = _kp
+
     # 4. Automatic Escalation Detection (SK-VDD-001 Section 10.1)
     escalations = []
     if cat_results.get("key_person", {}).get("sanctions_match_flag"):
@@ -520,6 +564,8 @@ def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns=""
     if cat_results.get("compliance", {}).get("prohibition_order_flag"):
         escalations.append("Active Regulatory Prohibition or Cease-and-Desist Order")
         cat_results["compliance"]["score"] = 90
+    if _kp_escalation and _kp_escalation not in escalations:
+        escalations.append(_kp_escalation)
 
     # 5. Executive Synthesis
     raw_synth = _llm_dispatch(_synthesis_prompt(vendor, industry, country, cat_results, concerns, total_hits), 350)
@@ -547,13 +593,48 @@ def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns=""
             k: v for k, v in financial_metrics.items() if v not in (None, "", "N/A", "Not Available")
         }
 
-    sources_used = [
-        "SEDAR+ (sedarplus.ca)", "Canada Business Corporations Act (CBCA) Registry",
-        "Google News & Tier-1 Canadian Outlets (CBC, Globe & Mail, Financial Post)",
-        "CanLII Canadian Litigation Records", "OSFI Public Enforcement Actions",
-        "FINTRAC AMP Register", "CSA Enforcement Database",
-        "Canadian Centre for Cyber Security (CCCS)", "CISA KEV Catalogue & NVD"
-    ]
+    # Build data_sources_used from actual URLs that returned results (SK-VDD-001 Section 8)
+    _DOMAIN_TO_SOURCE = {
+        "sedarplus.ca": "SEDAR+ (sedarplus.ca)",
+        "cbc.ca": "CBC News (cbc.ca)",
+        "theglobeandmail.com": "The Globe and Mail",
+        "nationalpost.com": "National Post",
+        "financialpost.com": "Financial Post",
+        "canlii.org": "CanLII Canadian Litigation Records",
+        "cyber.gc.ca": "Canadian Centre for Cyber Security (CCCS)",
+        "cisa.gov": "CISA KEV Catalogue",
+        "nvd.nist.gov": "NVD (NIST)",
+        "osfi-bsif.gc.ca": "OSFI Public Enforcement Actions",
+        "fintrac-canafe.gc.ca": "FINTRAC AMP Register",
+        "osc.ca": "OSC Enforcement Database",
+        "bcsc.bc.ca": "BCSC Enforcement Database",
+        "autorites-financiers.gouv.qc.ca": "AMF Quebec Enforcement",
+        "priv.gc.ca": "Office of the Privacy Commissioner (PIPEDA)",
+        "crtc.gc.ca": "CRTC (CASL)",
+        "competitionbureau.gc.ca": "Competition Bureau",
+        "haveibeenpwned.com": "HaveIBeenPwned",
+        "wikipedia.org": "Wikipedia (Corporate Profile)",
+        "linkedin.com": "LinkedIn (Executive Profile)",
+        "crunchbase.com": "Crunchbase (Corporate Profile)",
+    }
+
+    _all_urls = set()
+    for cat in RISK_CATEGORIES:
+        for url in cat_results.get(cat, {}).get("evidence_urls", []):
+            _all_urls.add(url)
+    for url in data.get("profile", {}).get("urls", []):
+        _all_urls.add(url)
+
+    sources_used = []
+    for url in _all_urls:
+        clean = url.replace("https://", "").replace("http://", "").replace("www.", "").split("/")[0].lower()
+        for domain, source_name in _DOMAIN_TO_SOURCE.items():
+            if domain in clean and source_name not in sources_used:
+                sources_used.append(source_name)
+                break
+
+    if not sources_used:
+        sources_used = ["Serper Google Search (aggregated public web results)"]
 
     return {
         "company_profile": company_profile,
@@ -564,6 +645,7 @@ def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns=""
                 "signals": cat_results[cat].get("signals", []),
                 "articles": cat_results[cat].get("articles", []),
                 "persons": cat_results[cat].get("persons", []),
+                "concentration_risk": cat_results[cat].get("concentration_risk", ""),
             }
             for cat in RISK_CATEGORIES
         },

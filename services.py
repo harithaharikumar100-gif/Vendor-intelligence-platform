@@ -15,8 +15,10 @@ Features:
 """
 
 import os
+import re
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlparse
 from normalizer import normalize_vendor_name
 from scraper import collect_vendor_signals
 from financial_fetcher import fetch_financial_and_profile
@@ -198,6 +200,31 @@ def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada"
         if overall >= 75 and "Overall Vendor Risk Score >= 75 (Critical rating)" not in escalations:
             escalations.append("Overall Vendor Risk Score >= 75 (Critical rating)")
 
+        # SK-VDD-001 Section 10.1: Entity Disambiguation Escalation
+        # Flag if profile search results point to 2+ distinct company websites (excluding info aggregators)
+        _reference_domains = [
+            "google.", "serper.", "bing.", "yahoo.", "duckduckgo.", "search.",
+            "wikipedia.org", "linkedin.com", "crunchbase.com", "zoominfo.com",
+            "bloomberg.com", "reuters.com", "forbes.com", "marketwatch.com",
+            "stockanalysis.com", "finviz.com", "yahoofinance.", "investing.com",
+        ]
+        _profile_urls = data.get("profile", {}).get("urls", [])
+        _company_domains = set()
+        for url in _profile_urls:
+            try:
+                netloc = urlparse(url).netloc.lower().replace("www.", "")
+                if netloc and not any(d in netloc for d in _reference_domains):
+                    _company_domains.add(netloc)
+            except Exception:
+                pass
+        if len(_company_domains) >= 2:
+            disambiguation_flag = "Multiple entities match the provided vendor name — manual disambiguation required"
+            if disambiguation_flag not in escalations:
+                escalations.append(disambiguation_flag)
+            result["disambiguation_flag"] = True
+        else:
+            result["disambiguation_flag"] = False
+
         result["overall_score"] = overall
         result["overall_risk_score"] = overall
         result["overall_risk_rating"] = tier_name
@@ -233,6 +260,16 @@ def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada"
         )
         if has_metrics:
             confidence = min(confidence + 5, 98)
+
+        # SK-VDD-001 Section 9.2: Private company confidence flag
+        # Private companies (no ticker, no SEC/SEDAR+ financials) get reduced confidence
+        has_ticker = bool(ticker.strip() or financial_metrics.get("ticker"))
+        if not has_ticker or not has_metrics:
+            result["private_co_confidence_flag"] = "Reduced"
+            confidence = max(confidence - 15, 30)
+        else:
+            result["private_co_confidence_flag"] = "Standard"
+
         result["confidence_score"] = confidence
 
         _safe_print(f"\n[+] Due Diligence Complete: Overall Score: {overall} ({tier_name} - {tier_meta['traffic_light']}) | {scores}")
