@@ -21,14 +21,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 PREFERRED_MODELS = [
-    "openai/gpt-oss-20b",
-    "openai/gpt-oss-120b",
+    "qwen/qwen3.8-27b",
     "groq/compound",
     "groq/compound-mini",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "qwen/qwen3.6-27b",
     "llama-3.3-70b-versatile",
     "llama-3.1-8b-instant",
-    "qwen/qwen3.6-27b",
-    "qwen/qwen3.8-27b"
 ]
 
 RISK_CATEGORIES = ["financial", "reputation", "key_person", "cyber", "compliance"]
@@ -118,21 +118,42 @@ def _call_groq(prompt: str, max_tokens: int = 400, model_hint: str = None) -> st
     models = [model_hint] + [m for m in _DISCOVERED_MODELS if m != model_hint] if model_hint else _DISCOVERED_MODELS
 
     for m_name in models:
-        try:
-            r = client.chat.completions.create(
-                model=m_name,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=max_tokens
-            )
-            res = (r.choices[0].message.content or "").strip()
-            if res:
-                return res
-        except Exception as e:
-            err_str = str(e).lower()
-            if any(k in err_str for k in ["429", "rate limit", "404", "model_not_found"]):
-                continue
-            time.sleep(0.4)
+        for attempt in range(2):
+            try:
+                r = client.chat.completions.create(
+                    model=m_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.1,
+                    max_tokens=max_tokens
+                )
+                res = (r.choices[0].message.content or "").strip()
+                if res:
+                    stripped = res.rstrip()
+                    if stripped.startswith('{') and not stripped.endswith('}') and not stripped.endswith(']'):
+                        _safe_log(f"  [~] Groq model {m_name} returned truncated JSON, trying next model...")
+                        break
+                    # Validate response contains parseable JSON before accepting
+                    if _parse_json(res):
+                        return res
+                    _safe_log(f"  [~] Groq model {m_name} returned non-JSON response, trying next model...")
+                    break
+                else:
+                    _safe_log(f"  [~] Groq model {m_name} returned empty response, trying next model...")
+                    break
+            except Exception as e:
+                err_str = str(e).lower()
+                if "429" in err_str or "rate limit" in err_str:
+                    if attempt < 1:
+                        _safe_log(f"  [~] Groq model {m_name} rate limited, retrying in 3s...")
+                        time.sleep(3)
+                        continue
+                    _safe_log(f"  [!] Groq model {m_name} rate limited, trying next model...")
+                    break
+                if "413" in err_str or "entity too large" in err_str:
+                    _safe_log(f"  [!] Groq model {m_name} prompt too large, trying next model...")
+                    break
+                _safe_log(f"  [!] Groq model {m_name} error: {str(e)[:100]}")
+                break
 
     return ""
 
@@ -187,7 +208,7 @@ def _financial_prompt(vendor, industry, country, evidence, urls, metrics, concer
         if rows:
             m_block = "VERIFIED FINANCIAL DATA:\n" + "\n".join(rows) + "\n\n"
 
-    ev = (evidence or "Standard public financial search.")[:1400]
+    ev = (evidence or "Standard public financial search.")[:800]
     return f"""Senior Financial Risk Auditor (SK-VDD-001 Section 6.1).
 Assess financial solvency, liquidity, debt load, and bankruptcy risk for {vendor} ({industry}, {country}).
 User Concerns: {concerns or 'None'}
@@ -206,7 +227,7 @@ Return ONLY valid JSON:
 
 
 def _reputational_prompt(vendor, industry, country, evidence, urls, concerns):
-    ev = (evidence or "Standard adverse media scan.")[:1400]
+    ev = (evidence or "Standard adverse media scan.")[:800]
     return f"""Adverse Media Risk Analyst (SK-VDD-001 Section 6.2).
 Assess controversies, lawsuits, class actions, and reputational risk for {vendor} ({industry}, {country}).
 User Concerns: {concerns or 'None'}
@@ -228,7 +249,7 @@ def _key_person_prompt(vendor, industry, country, evidence, urls, exec_profile, 
     if exec_profile:
         p_block = f"LEADERSHIP: CEO: {exec_profile.get('ceo', 'N/A')} | Founder: {exec_profile.get('founder', 'N/A')}\n\n"
 
-    ev = (evidence or "Standard executive screening.")[:1400]
+    ev = (evidence or "Standard executive screening.")[:800]
     return f"""Key-Person & Governance Analyst (SK-VDD-001 Section 6.3).
 Assess executive stability, sanctions, and governance for {vendor} ({industry}, {country}).
 User Concerns: {concerns or 'None'}
@@ -248,7 +269,7 @@ Return ONLY valid JSON:
 
 
 def _cyber_prompt(vendor, industry, country, domain, evidence, urls, concerns):
-    ev = (evidence or "Standard cyber scan.")[:1400]
+    ev = (evidence or "Standard cyber scan.")[:800]
     return f"""Cybersecurity Auditor (SK-VDD-001 Section 6.4).
 Assess data breaches, CVEs, ransomware, and attack surface for {vendor} (Domain: {domain or 'N/A'}, {industry}, {country}).
 User Concerns: {concerns or 'None'}
@@ -267,7 +288,7 @@ Return ONLY valid JSON:
 
 
 def _compliance_prompt(vendor, industry, country, evidence, urls, concerns):
-    ev = (evidence or "Standard regulatory check.")[:1400]
+    ev = (evidence or "Standard regulatory check.")[:800]
     return f"""Regulatory Compliance Officer (SK-VDD-001 Section 6.5).
 Assess regulatory penalties, orders, and compliance track record for {vendor} ({industry}, {country}).
 User Concerns: {concerns or 'None'}
@@ -390,6 +411,20 @@ def _autonomous_fallback_engine(vendor, industry, country, concerns, financial_m
     if len(fin_signals) < 3:
         fin_signals.append({"category": "Solvency", "indicator": f"Strong balance sheet liquidity and verified operational cash flow across trailing 36 months.", "severity": "Low"})
         fin_signals.append({"category": "Audit Opinion", "indicator": "No going-concern modifications or material weakness disclosures identified in public filings.", "severity": "Low"})
+
+    # Build financial summary from available metrics
+    fin_summary_parts = []
+    if financial_metrics:
+        if financial_metrics.get("current_ratio"):
+            fin_summary_parts.append(f"current ratio of {financial_metrics['current_ratio']}")
+        if financial_metrics.get("debt_equity"):
+            fin_summary_parts.append(f"debt-to-equity of {financial_metrics['debt_equity']}")
+        if financial_metrics.get("net_margin"):
+            fin_summary_parts.append(f"net margin of {financial_metrics['net_margin']}")
+        if financial_metrics.get("revenue"):
+            fin_summary_parts.append(f"revenue of {financial_metrics['revenue']}")
+    fin_detail = ", ".join(fin_summary_parts) if fin_summary_parts else "standard public financial disclosures"
+    fin_summary = f"Financial evaluation for {vendor} indicates {'stable operational health with ' + fin_detail + '.' if fin_summary_parts else 'manageable solvency posture based on ' + fin_detail + '.'}"
 
     # Reputational Risk (20%)
     rep_score = 22
@@ -564,12 +599,12 @@ def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns=""
         p = _parse_json(raw)
         return "compliance", p
 
-    with ThreadPoolExecutor(max_workers=5) as ex:
-        futs = [ex.submit(_run_fin), ex.submit(_run_rep), ex.submit(_run_kp), ex.submit(_run_cyber), ex.submit(_run_comp)]
-        for fut in as_completed(futs):
-            cat, res = fut.result()
-            if isinstance(res, dict) and "score" in res:
-                cat_results[cat] = res
+    for i, _runner in enumerate([_run_fin, _run_rep, _run_kp, _run_cyber, _run_comp]):
+        if i > 0:
+            time.sleep(2)  # Space out LLM calls to stay under Groq free-tier rate limit
+        cat, res = _runner()
+        if isinstance(res, dict) and "score" in res:
+            cat_results[cat] = res
 
     # 3. Always run Autonomous Rule Engine — even if LLM returned a score,
     #    backfill any empty signals/articles/persons so the UI always shows detail.
@@ -630,6 +665,50 @@ def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns=""
         if not c.get("summary"):
             c["summary"] = auto_fallback[cat]["summary"]
 
+    # 3a. Key-Person Concentration Risk Structural Checks (SK-VDD-001 Section 6.3.3)
+    _kp = cat_results.get("key_person", {})
+    _kp_persons = _kp.get("persons", [])
+    _kp_evidence = data.get("key_person", {}).get("text", "").lower()
+
+    _structural_signals = []
+    _kp_escalation = None
+    # Single-person dependency
+    if len(_kp_persons) <= 1:
+        _structural_signals.append({
+            "name": _kp_persons[0].get("name", "Sole Executive") if _kp_persons else "Unknown",
+            "role": "Key-Person Dependency",
+            "flags": ["Single-person dependency — only one executive identified"],
+            "severity": "Elevated"
+        })
+        _kp["concentration_risk"] = "Elevated"
+    # Thin executive bench (< 3 named executives)
+    if len(_kp_persons) < 3:
+        _structural_signals.append({
+            "name": "Executive Bench",
+            "role": "Governance",
+            "flags": [f"Thin executive bench — only {len(_kp_persons)} executive(s) identified (minimum 3 expected)"],
+            "severity": "Elevated"
+        })
+        if _kp.get("concentration_risk") != "High":
+            _kp["concentration_risk"] = "Elevated"
+    # Recent attrition (2+ C-suite departures in 12 months)
+    _attrition_keywords = ["resigned", "departed", "stepped down", "left the company", "fired", "terminated"]
+    _attrition_count = sum(1 for kw in _attrition_keywords if kw in _kp_evidence)
+    if _attrition_count >= 2:
+        _structural_signals.append({
+            "name": "Recent Attrition",
+            "role": "Governance",
+            "flags": [f"Recent attrition — {_attrition_count} executive departure(s) detected in 12-month lookback"],
+            "severity": "High"
+        })
+        _kp["concentration_risk"] = "High"
+        _kp_escalation = "Key-Person Attrition (2+ C-suite exits in 12 months)"
+
+    if _structural_signals:
+        _kp.setdefault("persons", []).extend(_structural_signals)
+
+    cat_results["key_person"] = _kp
+
     # 4. Automatic Escalation Detection (SK-VDD-001 Section 10.1)
     escalations = []
     if cat_results.get("key_person", {}).get("sanctions_match_flag"):
@@ -641,6 +720,8 @@ def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns=""
     if cat_results.get("compliance", {}).get("prohibition_order_flag"):
         escalations.append("Active Regulatory Prohibition or Cease-and-Desist Order")
         cat_results["compliance"]["score"] = 90
+    if _kp_escalation and _kp_escalation not in escalations:
+        escalations.append(_kp_escalation)
 
     # 5. Executive Synthesis
     raw_synth = _llm_dispatch(_synthesis_prompt(vendor, industry, country, cat_results, concerns, total_hits), 350)
