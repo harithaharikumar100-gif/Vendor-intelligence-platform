@@ -194,19 +194,81 @@ def _yfinance(ticker: str) -> dict:
         return {}
     try:
         import yfinance as yf
-        t_obj = yf.Ticker(ticker)
-        info = t_obj.info or {}
-        if not info or len(info) < 5:
-            if not ticker.endswith(".TO") and ("-" not in ticker):
-                t_obj = yf.Ticker(f"{ticker}.TO")
-                info = t_obj.info or {}
-
-        if not info:
+        
+        ticker_variants = [ticker]
+        if not ticker.endswith(".TO") and ("-" not in ticker):
+            ticker_variants.append(f"{ticker}.TO")
+        if "." in ticker and not ticker.endswith(".TO"):
+            ticker_variants.append(ticker.replace(".", "-"))
+        if "-" in ticker:
+            ticker_variants.append(ticker.replace("-", "."))
+        
+        info = {}
+        resolved_ticker = ""
+        for t_variant in ticker_variants:
+            try:
+                _safe_print(f"  [•] Trying yfinance ticker: {t_variant}")
+                t_obj = yf.Ticker(t_variant)
+                
+                fast_info = {}
+                try:
+                    fi = t_obj.fast_info
+                    if fi:
+                        for attr in ["market_cap", "total_revenue", "net_income_to_common", 
+                                      "trailing_eps", "trailing_pe", "current_ratio",
+                                      "debt_to_equity", "profit_margins", "operating_margins",
+                                      "return_on_equity", "revenue_growth"]:
+                            try:
+                                val = getattr(fi, attr, None)
+                                if val is not None:
+                                    key_map = {
+                                        "market_cap": "marketCap",
+                                        "total_revenue": "totalRevenue",
+                                        "net_income_to_common": "netIncomeToCommon",
+                                        "trailing_eps": "trailingEps",
+                                        "trailing_pe": "trailingPE",
+                                        "current_ratio": "currentRatio",
+                                        "debt_to_equity": "debtToEquity",
+                                        "profit_margins": "profitMargins",
+                                        "operating_margins": "operatingMargins",
+                                        "return_on_equity": "returnOnEquity",
+                                        "revenue_growth": "revenueGrowth",
+                                    }
+                                    fast_info[key_map.get(attr, attr)] = val
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                
+                try:
+                    reg_info = t_obj.info or {}
+                    if reg_info and isinstance(reg_info, dict) and len(reg_info) > 2:
+                        info = reg_info
+                        resolved_ticker = t_variant
+                        if fast_info:
+                            for k, v in fast_info.items():
+                                if k not in info or not info[k]:
+                                    info[k] = v
+                        break
+                except Exception:
+                    if fast_info:
+                        info = fast_info
+                        resolved_ticker = t_variant
+                        break
+            except Exception as inner_e:
+                _safe_print(f"  [!] Ticker {t_variant} failed: {str(inner_e)[:80]}")
+                continue
+        
+        if not info or (isinstance(info, dict) and len(info) < 3):
+            _safe_print(f"  [•] yfinance returned sparse data, attempting web fallback for {ticker}")
             return {}
 
         de = _fmt(info.get("debtToEquity"), "f")
         if de:
-            de = f"{float(de):.2f}x"
+            try:
+                de = f"{float(de):.2f}x"
+            except Exception:
+                pass
 
         roce = _fmt(info.get("returnOnEquity"), "pct")
 
@@ -242,7 +304,7 @@ def _yfinance(ticker: str) -> dict:
             pass
 
         out = {
-            "ticker": ticker.upper(),
+            "ticker": (resolved_ticker or ticker).upper(),
             "revenue": _fmt(info.get("totalRevenue") or info.get("revenue")),
             "net_income": _fmt(info.get("netIncomeToCommon")),
             "eps": _fmt(info.get("trailingEps"), "f"),
@@ -259,10 +321,110 @@ def _yfinance(ticker: str) -> dict:
             "ceo": ceo,
             "source": "yfinance",
         }
-        return {k: v for k, v in out.items() if v}
+        result = {k: v for k, v in out.items() if v}
+        _safe_print(f"  [✓] yfinance resolved {len(result)} fields for {resolved_ticker or ticker}")
+        return result
     except Exception as e:
-        _safe_print(f"  [!] yfinance [{ticker}]: {e}")
+        err_str = str(e).lower()
+        if "crumb" in err_str or "unauthorized" in err_str or "401" in err_str or "403" in err_str:
+            _safe_print(f"  [!] yfinance API auth blocked for {ticker} (Yahoo rate-limiting). Skipping gracefully.")
+        else:
+            _safe_print(f"  [!] yfinance [{ticker}]: {str(e)[:120]}")
         return {}
+
+
+# ─── Wikipedia REST API Financial Enrichment (works on Render, no IP block) ───
+
+def _wikipedia_financials(vendor: str) -> dict:
+    """
+    Pull structured corporate data from Wikipedia REST summary + infobox API.
+    Returns a partial dict with any fields found: employees, revenue, headquarters,
+    founded, founder. Does NOT throw — always safe to call.
+    """
+    out = {}
+    try:
+        slug = vendor.strip().replace(" ", "_")
+        r = requests.get(
+            f"https://en.wikipedia.org/api/rest_v1/page/summary/{slug}",
+            headers={"User-Agent": "DRiskify/2.0 (vendor-due-diligence)"},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            # Try without Inc./Ltd./Corp. suffix
+            slug2 = re.sub(r'\b(inc|ltd|limited|corp|corporation|llc|co)\.?\s*$', '', vendor.strip(), flags=re.I).strip().replace(" ", "_")
+            r = requests.get(
+                f"https://en.wikipedia.org/api/rest_v1/page/summary/{slug2}",
+                headers={"User-Agent": "DRiskify/2.0 (vendor-due-diligence)"},
+                timeout=10,
+            )
+        if r.status_code == 200:
+            d = r.json()
+            extract = d.get("extract", "")
+            tl = extract.lower()
+
+            # Employees: "X,XXX employees" or "XX,000 people"
+            m = re.search(r'([\d,]+)\s+(?:employees|people|staff|workforce)', tl)
+            if m:
+                emp_str = m.group(1).replace(",", "")
+                try:
+                    emp_int = int(emp_str)
+                    if 10 <= emp_int <= 5_000_000:
+                        out["employees"] = f"{emp_int:,}"
+                except Exception:
+                    pass
+
+            # Revenue: "$X.X billion" or "$X million" near "revenue"
+            for pat in [
+                r'revenue[^$\n]{0,50}\$([\d,.]+)\s*(billion|million|trillion)',
+                r'\$([\d,.]+)\s*(billion|million|trillion)[^)]{0,50}revenue',
+                r'annual(?:\s+\w+){0,5}\$([\d,.]+)\s*(billion|million|trillion)',
+            ]:
+                m = re.search(pat, tl)
+                if m:
+                    try:
+                        val = float(m.group(1).replace(",", ""))
+                        scale = m.group(2)
+                        if scale == "trillion":
+                            out["revenue"] = f"${val:.2f}T"
+                        elif scale == "billion":
+                            out["revenue"] = f"${val:.2f}B"
+                        else:
+                            out["revenue"] = f"${val:.0f}M"
+                        break
+                    except Exception:
+                        pass
+
+            # Headquarters
+            for pat in [
+                r'headquartered in ([A-Za-z][A-Za-z\s,\.\-]+?)(?:\.|,\s+[A-Z]|\n|;)',
+                r'based in ([A-Za-z][A-Za-z\s,\.]+?)(?:\.|,\s+[A-Z]|\n)',
+            ]:
+                m = re.search(pat, extract)
+                if m:
+                    hq_val = m.group(1).strip().rstrip(",")
+                    if 3 < len(hq_val) < 60 and "http" not in hq_val.lower():
+                        out["headquarters"] = hq_val
+                        break
+
+            # Founded year
+            m = re.search(r'(?:founded|established|incorporated)[^0-9]*((?:18|19|20)\d{2})', tl)
+            if m:
+                out["founded"] = m.group(1)
+
+            # Founder
+            for pat in [
+                r'(?:founded|co-founded) by ([A-Z][a-zA-Z\u00C0-\u024F\-\.]{1,25}(?:\s[A-Z][a-zA-Z\u00C0-\u024F\-\.]{1,25}){1,2})',
+                r'founders?\s*:\s*([A-Z][a-zA-Z\u00C0-\u024F\-\.]{1,25}(?:\s[A-Z][a-zA-Z\u00C0-\u024F\-\.]{1,25}){1,2})',
+            ]:
+                m = re.search(pat, extract)
+                if m and _is_valid_name(m.group(1)):
+                    out["founder"] = m.group(1).strip()
+                    break
+
+    except Exception as e:
+        _safe_print(f"  [!] Wikipedia REST [{vendor}]: {e}")
+
+    return out
 
 
 # ─── Name Validation Helpers ──────────────────────────────────────────────────
@@ -434,21 +596,33 @@ def fetch_financial_and_profile(
     if cu and not cu.startswith("http"):
         cu = "https://" + cu
 
-    # Parallel retrieval
-    with ThreadPoolExecutor(max_workers=3) as ex:
+    # Parallel retrieval — include Wikipedia REST as a dedicated source
+    with ThreadPoolExecutor(max_workers=4) as ex:
         ticker_future = ex.submit(_find_ticker, vendor, country) if not ticker.strip() else None
         profile_future = ex.submit(_scrape_profile, vendor, country, cu)
         ceo_future = ex.submit(_fetch_ceo, vendor, cu)
+        wiki_future = ex.submit(_wikipedia_financials, vendor)
 
         resolved_ticker = ticker.strip() or (ticker_future.result() if ticker_future else "")
         prof = profile_future.result()
         ceo_from_web = ceo_future.result()
+        wiki_data = wiki_future.result()
 
+    # Merge in order: scrape → wikipedia → ceo override
     profile_extras.update(prof)
+
+    # Wikipedia fills any gaps left by regex scraping
+    for wk in ("employees", "headquarters", "founded", "founder", "revenue"):
+        if wiki_data.get(wk) and not profile_extras.get(wk):
+            if wk == "revenue":
+                financial_metrics["revenue"] = wiki_data[wk]
+            else:
+                profile_extras[wk] = wiki_data[wk]
+
     if ceo_from_web:
         profile_extras["ceo"] = ceo_from_web
 
-    # Pull yfinance for public companies
+    # Pull yfinance for public companies (silent on 401 — Yahoo blocks Render IPs)
     if resolved_ticker:
         yf_data = _yfinance(resolved_ticker)
         for k in ("revenue", "net_income", "eps", "pe_ratio", "debt_equity",
@@ -457,9 +631,9 @@ def fetch_financial_and_profile(
             if yf_data.get(k):
                 financial_metrics[k] = yf_data[k]
 
-        # Use yfinance profile if missing from web
+        # Use yfinance profile if missing from web/wikipedia
         for pk in ("employees", "headquarters", "ceo"):
-            if yf_data.get(pk) and (pk not in profile_extras or not profile_extras[pk]):
+            if yf_data.get(pk) and not profile_extras.get(pk):
                 profile_extras[pk] = yf_data[pk]
 
     _safe_print(f"  [+] Ingested Profile: {profile_extras}")
