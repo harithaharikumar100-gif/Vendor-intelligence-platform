@@ -23,6 +23,9 @@ from normalizer import normalize_vendor_name
 from scraper import collect_vendor_signals
 from financial_fetcher import fetch_financial_and_profile
 from ai_engine import analyze_vendor_full
+from registry_lookup import search_all_registries
+from canlii_search import search_litigation
+from sedarplus_lookup import search_filings
 
 RISK_CATEGORIES = ["financial", "reputation", "key_person", "cyber", "compliance"]
 
@@ -115,14 +118,55 @@ def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada"
                 company_url=company_url
             )
 
-        with ThreadPoolExecutor(max_workers=2) as ex:
+        def _registry():
+            try:
+                registries = search_all_registries(clean_vendor, business_number, company_url, country)
+                litigation = search_litigation(clean_vendor)
+                filings = search_filings(clean_vendor, ticker)
+                return {"registries": registries, "litigation": litigation, "filings": filings}
+            except Exception as e:
+                _safe_print(f"  [!] Registry lookups failed: {e}")
+                return {}
+
+        with ThreadPoolExecutor(max_workers=3) as ex:
             sf = ex.submit(_scrape)
             ff = ex.submit(_finance)
+            rf = ex.submit(_registry)
             data = sf.result()
             financial_metrics, prof_extras = ff.result()
+            registry_data = rf.result()
 
         if not isinstance(data, dict):
             data = {}
+
+        # Inject registry, litigation, and filing data into evidence text (Phase 1 sources)
+        if registry_data:
+            reg = registry_data.get("registries", {})
+            lit = registry_data.get("litigation", {})
+            fil = registry_data.get("filings", {})
+            reg_parts = []
+            fed = reg.get("federal_registry", {})
+            if fed.get("found"):
+                reg_parts.append(f"CORPORATIONS CANADA: Status={fed.get('status','N/A')}, BN={fed.get('business_number','N/A')}, Directors={', '.join(fed.get('directors', []))}")
+            prov = reg.get("provincial_registry", {})
+            if prov.get("found"):
+                reg_parts.append(f"PROVINCIAL REGISTRY: {prov.get('snippet','')}")
+            if reg_parts:
+                reg_text = "\n--- REGISTRY DATA ---\n" + "\n".join(reg_parts)
+                for dim_key in ("financial", "key_person"):
+                    if dim_key in data and isinstance(data[dim_key], dict):
+                        data[dim_key]["text"] = (data[dim_key].get("text", "") or "") + reg_text
+            if lit.get("total", 0) > 0:
+                lit_lines = [f"  - {c.get('case_name','')} ({c.get('citation','')}, {c.get('court','')}, {c.get('date','')}, {c.get('severity','')})" for c in lit.get("cases", [])[:10]]
+                lit_text = "\n--- CANLII LITIGATION ---\n" + "\n".join(lit_lines)
+                for dim_key in ("reputation", "compliance"):
+                    if dim_key in data and isinstance(data[dim_key], dict):
+                        data[dim_key]["text"] = (data[dim_key].get("text", "") or "") + lit_text
+            if fil.get("total", 0) > 0:
+                fil_lines = [f"  - {f.get('filing_type','')}: {f.get('title','')} ({f.get('date','')})" for f in fil.get("filings", [])[:10]]
+                fil_text = "\n--- SEDAR+ FILINGS ---\n" + "\n".join(fil_lines)
+                if "financial" in data and isinstance(data["financial"], dict):
+                    data["financial"]["text"] = (data["financial"].get("text", "") or "") + fil_text
 
         # Inject structured profile into context
         existing_profile = data.get("profile", {})
@@ -271,6 +315,17 @@ def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada"
             result["private_co_confidence_flag"] = "Standard"
 
         result["confidence_score"] = confidence
+
+        # Source Health Tracking (SK-VDD-001 Section 5 & 10.2)
+        result["source_health"] = {
+            "corporations_canada": registry_data.get("registries", {}).get("federal_registry", {}).get("found", False),
+            "provincial_registry": registry_data.get("registries", {}).get("provincial_registry", {}).get("found", False),
+            "canlii_litigation": registry_data.get("litigation", {}).get("total", 0) > 0,
+            "sedarplus_filings": registry_data.get("filings", {}).get("total", 0) > 0,
+            "serper_search": bool(data.get("meta")),
+            "yfinance": bool(financial_metrics),
+            "corporate_profile": bool(prof_extras),
+        }
 
         # ── Final Data Completeness Assurance Layer (Section 8 Canonical Schema) ──
         # Ensure 100% of required fields exist; never return empty arrays or nulls
