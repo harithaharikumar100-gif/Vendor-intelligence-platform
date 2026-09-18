@@ -1,160 +1,174 @@
 import React, { useState } from 'react';
-import { ChevronDown, ChevronUp, ExternalLink, ShieldAlert, CheckCircle, Info } from 'lucide-react';
+import { ChevronDown, ChevronUp, ExternalLink } from 'lucide-react';
+
+const severityDot = (sev) => {
+  switch (sev) {
+    case 'Critical': return 'bg-tier-critical';
+    case 'High': return 'bg-tier-high';
+    case 'Elevated': return 'bg-tier-medium';
+    default: return 'bg-ink-700';
+  }
+};
+
+const severityText = (sev) => {
+  switch (sev) {
+    case 'Critical': return 'text-tier-critical';
+    case 'High': return 'text-tier-high';
+    case 'Elevated': return 'text-tier-medium';
+    default: return 'text-ink-500';
+  }
+};
 
 export default function DimensionCard({ title, weight, score, sources, summary, signals, articles, persons, links, colorHex }) {
   const [expanded, setExpanded] = useState(false);
 
-  const getTierBadge = (s) => {
-    if (s <= 24) return { label: 'Low', bg: 'bg-emerald-500/10', text: 'text-emerald-400', border: 'border-emerald-500/30' };
-    if (s <= 49) return { label: 'Medium', bg: 'bg-amber-500/10', text: 'text-amber-400', border: 'border-amber-500/30' };
-    if (s <= 74) return { label: 'High', bg: 'bg-orange-500/10', text: 'text-orange-400', border: 'border-orange-500/30' };
-    return { label: 'Critical', bg: 'bg-rose-500/15', text: 'text-rose-400', border: 'border-rose-500/30' };
+  const getTierLabel = (s) => {
+    if (s <= 24) return { label: 'Low', color: 'text-tier-low' };
+    if (s <= 49) return { label: 'Medium', color: 'text-tier-medium' };
+    if (s <= 74) return { label: 'High', color: 'text-tier-high' };
+    return { label: 'Critical', color: 'text-tier-critical' };
   };
 
-  const tier = getTierBadge(score);
+  const tier = getTierLabel(score);
 
   return (
-    <div className="bg-surface border border-border hover:border-border-light rounded-xl transition-all duration-200 overflow-hidden shadow-lg mb-4">
+    <div className="border border-border rounded-xl overflow-hidden mb-3 relative">
+      <span className={`absolute left-0 top-0 bottom-0 w-0.5 ${tier.color.replace('text-', 'bg-')}`} />
       {/* Card Header */}
-      <div 
-        className="p-5 flex items-center justify-between cursor-pointer select-none"
-        onClick={() => setExpanded(!expanded)}
-      >
-        <div className="flex items-center gap-3">
-          <div className="w-3 h-3 rounded-full" style={{ backgroundColor: colorHex }} />
-          <div>
-            <div className="flex items-center gap-2">
-              <h3 className="text-base font-bold text-white tracking-tight">{title}</h3>
-              <span className="text-xs text-slate-400 font-medium">({weight})</span>
-            </div>
-            <p className="text-xs text-slate-400 mt-0.5">{sources}</p>
+      <div className="p-5 flex items-center justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-2">
+            <h3 className="text-[15px] font-medium text-ink-50 tracking-tight">{title}</h3>
+            <span className="text-xs text-ink-500">{weight}</span>
           </div>
+          <p className="text-xs text-ink-500 mt-0.5">{sources}</p>
         </div>
 
-        <div className="flex items-center gap-3">
-          <div className="text-right">
-            <span className="text-2xl font-extrabold font-mono text-white leading-none">
-              {score}
-            </span>
-            <span className="text-xs text-slate-500 font-mono">/100</span>
-            <div className="mt-1">
-              <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border ${tier.border} ${tier.bg} ${tier.text}`}>
-                {tier.label}
-              </span>
-            </div>
+        <div className="text-right shrink-0">
+          <span className={`text-xl font-semibold font-mono ${tier.color}`}>{score}</span>
+          <span className="text-xs text-ink-500 font-mono">/100</span>
+          <div className={`text-[11px] font-medium uppercase tracking-wider mt-0.5 ${tier.color}`}>
+            {tier.label}
           </div>
-          <button className="p-1 rounded-lg hover:bg-slate-800 text-slate-400">
-            {expanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
-          </button>
         </div>
       </div>
 
-      {/* Primary Assessment Quote */}
+      {/* Assessment */}
       <div className="px-5 pb-4">
-        <p className="text-sm text-slate-300 leading-relaxed bg-slate-900/60 p-3.5 rounded-lg border border-slate-800/80">
-          <span className="font-semibold text-slate-100">Assessment: </span>
+        <p className="text-sm text-ink-200 leading-relaxed">
+          <span className="text-ink-500">Assessment — </span>
           {summary || 'Standard operating posture verified across primary databases.'}
         </p>
       </div>
 
-      {/* Expandable Signal Breakdown */}
-      {expanded && (
-        <div className="px-5 pb-5 pt-1 border-t border-border/80 space-y-4 text-xs">
-          {/* Financial / Cyber / Compliance Signals */}
-          {signals && signals.length > 0 && (
-            <div>
-              <p className="font-bold uppercase tracking-wider text-slate-400 text-[11px] mb-2">
-                Identified Risk Signals & Taxonomy:
-              </p>
-              <div className="space-y-1.5">
-                {signals.map((s, idx) => (
-                  <div key={idx} className="flex items-start gap-2 p-2 rounded-lg bg-slate-900/40 border border-slate-800">
-                    <span className="font-bold text-sky-400 shrink-0">[{s.category || s.authority || 'Signal'}]</span>
-                    <span className="text-slate-300 flex-1">{s.indicator || s.action}</span>
-                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase shrink-0 ${
-                      s.severity === 'Critical' ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40' :
-                      s.severity === 'High' ? 'bg-orange-500/20 text-orange-300 border border-orange-500/40' :
-                      'bg-slate-800 text-slate-400'
-                    }`}>
-                      {s.severity || 'Info'}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
+      {/* Risk factors, point by point — always visible */}
+      <div className="px-5 pb-4 space-y-5 text-[13px]">
+        {signals && signals.length > 0 && (
+          <div>
+            <p className="text-ink-500 text-[11px] uppercase tracking-wider mb-2">
+              Key risk factors ({signals.length})
+            </p>
+            <ol className="space-y-0">
+              {signals.map((s, idx) => (
+                <li key={idx} className="flex items-start gap-3 py-2 border-t border-border first:border-t-0">
+                  <span className="font-mono text-ink-500 shrink-0 w-5">{idx + 1}.</span>
+                  <span className={`w-1.5 h-1.5 rounded-full mt-1.5 shrink-0 ${severityDot(s.severity)}`} />
+                  <span className="text-ink-200 flex-1">
+                    <span className="text-ink-500">[{s.category || s.authority || 'Signal'}]</span> {s.indicator || s.action}
+                  </span>
+                  <span className={`text-[11px] font-medium uppercase tracking-wide shrink-0 ${severityText(s.severity)}`}>
+                    {s.severity || 'Info'}
+                  </span>
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
 
-          {/* Reputational Adverse Media */}
-          {articles && articles.length > 0 && (
-            <div>
-              <p className="font-bold uppercase tracking-wider text-slate-400 text-[11px] mb-2">
-                Adverse Media Articles (36m Horizon):
-              </p>
-              <div className="space-y-1.5">
-                {articles.map((a, idx) => (
-                  <div key={idx} className="p-2 rounded-lg bg-slate-900/40 border border-slate-800 flex items-start justify-between gap-2">
-                    <div>
-                      <p className="font-semibold text-slate-200">{a.headline}</p>
-                      <p className="text-[11px] text-slate-400 mt-0.5">{a.source} • {a.date}</p>
-                    </div>
-                    {a.url && (
-                      <a href={a.url} target="_blank" rel="noreferrer" className="text-sky-400 hover:text-sky-300 p-1">
-                        <ExternalLink size={14} />
-                      </a>
-                    )}
+        {articles && articles.length > 0 && (
+          <div>
+            <p className="text-ink-500 text-[11px] uppercase tracking-wider mb-2">
+              Key risk factors — adverse media, 36m horizon ({articles.length})
+            </p>
+            <ol className="space-y-0">
+              {articles.map((a, idx) => (
+                <li key={idx} className="flex items-start gap-3 py-2 border-t border-border first:border-t-0">
+                  <span className="font-mono text-ink-500 shrink-0 w-5">{idx + 1}.</span>
+                  <span className={`w-1.5 h-1.5 rounded-full mt-1.5 shrink-0 ${severityDot(a.severity)}`} />
+                  <div className="flex-1">
+                    <p className="text-ink-200">{a.headline}</p>
+                    <p className="text-[11px] text-ink-500 mt-0.5">{a.source} · {a.date}</p>
                   </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Key Persons */}
-          {persons && persons.length > 0 && (
-            <div>
-              <p className="font-bold uppercase tracking-wider text-slate-400 text-[11px] mb-2">
-                Executive & Governance Register:
-              </p>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                {persons.map((p, idx) => (
-                  <div key={idx} className="p-2.5 rounded-lg bg-slate-900/40 border border-slate-800">
-                    <p className="font-bold text-slate-100">{p.name}</p>
-                    <p className="text-slate-400 text-[11px]">{p.role} • {p.tenure || 'Established'}</p>
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      {p.flags?.map((f, i) => (
-                        <span key={i} className={`px-1.5 py-0.2 rounded text-[10px] ${f === 'Clean' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/20 text-rose-300'}`}>
-                          {f}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Verified Evidence Links */}
-          {links && links.length > 0 && (
-            <div className="pt-2">
-              <p className="font-bold uppercase tracking-wider text-slate-400 text-[10px] mb-1.5">
-                Verified Source Attributions:
-              </p>
-              <div className="flex flex-wrap gap-1.5">
-                {links.map((url, i) => {
-                  const domain = url.includes('://') ? url.split('/')[2] : url;
-                  return (
-                    <a
-                      key={i}
-                      href={url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-sky-500/10 border border-sky-500/20 text-sky-400 hover:bg-sky-500/20 hover:text-sky-300 text-[11px] transition-colors"
-                    >
-                      <ExternalLink size={11} />
-                      {domain}
+                  <span className={`text-[11px] font-medium uppercase tracking-wide shrink-0 ${severityText(a.severity)}`}>
+                    {a.severity || 'Info'}
+                  </span>
+                  {a.url && (
+                    <a href={a.url} target="_blank" rel="noreferrer" className="text-ink-500 hover:text-ink-50 shrink-0">
+                      <ExternalLink size={13} />
                     </a>
-                  );
-                })}
-              </div>
+                  )}
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
+
+        {persons && persons.length > 0 && (
+          <div>
+            <p className="text-ink-500 text-[11px] uppercase tracking-wider mb-2">
+              Executive & governance register ({persons.length})
+            </p>
+            <ol className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {persons.map((p, idx) => (
+                <li key={idx} className="border border-border rounded-lg p-3">
+                  <p className="text-ink-50 font-medium">
+                    <span className="font-mono text-ink-500 mr-1.5">{idx + 1}.</span>{p.name}
+                  </p>
+                  <p className="text-ink-500 text-[11px] mt-0.5">{p.role} · {p.tenure || 'Established'}</p>
+                  <div className="mt-1.5 flex flex-col gap-1">
+                    {p.flags?.map((f, i) => (
+                      <span key={i} className="text-[11px] text-ink-400 flex items-start gap-1.5">
+                        <span className={`w-1 h-1 rounded-full mt-1.5 shrink-0 ${
+                          f.toLowerCase().startsWith('clean') || f.toLowerCase().startsWith('no ') ? 'bg-tier-low' : 'bg-tier-high'
+                        }`} />
+                        {f}
+                      </span>
+                    ))}
+                  </div>
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
+      </div>
+
+      {/* Expandable extra detail (evidence source links only) */}
+      {links && links.length > 0 && (
+        <div className="border-t border-border">
+          <button
+            onClick={() => setExpanded(!expanded)}
+            className="w-full px-5 py-3 flex items-center justify-between text-xs text-ink-500 hover:text-ink-200 transition-colors"
+          >
+            <span>Verified source attributions ({links.length})</span>
+            {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+          </button>
+          {expanded && (
+            <div className="px-5 pb-4 flex flex-wrap gap-1.5">
+              {links.map((url, i) => {
+                const domain = url.includes('://') ? url.split('/')[2] : url;
+                return (
+                  <a
+                    key={i}
+                    href={url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-border text-ink-400 hover:text-ink-50 hover:border-border-light text-[11px] transition-colors"
+                  >
+                    <ExternalLink size={11} />
+                    {domain}
+                  </a>
+                );
+              })}
             </div>
           )}
         </div>

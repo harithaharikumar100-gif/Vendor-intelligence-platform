@@ -17,15 +17,23 @@ import re
 import time
 import requests
 import ssl
+from datetime import datetime
 from requests.adapters import HTTPAdapter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 from normalizer import normalize_vendor_name, extract_domain
+import config
 
 load_dotenv()
 SERPER_API_KEY = os.getenv("SERPER_API_KEY", "").strip()
-CURRENT_YEAR = 2026
-MIN_LOOKBACK_YEAR = 2023  # 36-month lookback per SK-VDD-001 Section 2.2
+
+# Intelligence horizon per SK-VDD-001 Section 2.2 / Section 11 lookback_months
+# (configurable, default 36 months). Computed from the current date rather than
+# hardcoded so the window doesn't silently go stale as real time passes.
+_NOW = datetime.utcnow()
+CURRENT_YEAR = _NOW.year
+_LOOKBACK_YEARS = max(1, config.LOOKBACK_MONTHS // 12)
+MIN_LOOKBACK_YEAR = _NOW.year - _LOOKBACK_YEARS
 
 _SERPER_CACHE = {}
 
@@ -100,34 +108,38 @@ def _serper(query: str, num: int = 5) -> list:
     return []
 
 
-# SK-VDD-001 Section 5: Authoritative Search Query Templates
+# SK-VDD-001 Section 5: Authoritative Search Query Templates.
+# "{years}" is substituted at query time with the rolling lookback window
+# (Section 11 lookback_months, default 36 months) instead of hardcoded years.
 SEARCH_QUERIES = {
     "financial": [
-        '"{vendor}" (site:sedarplus.ca OR "SEDAR+" OR "annual report" OR "MD&A" OR "audited financial") 2024 OR 2025 OR 2026',
-        '"{vendor}" (solvency OR liquidity OR "debt-to-equity" OR "retained earnings" OR bankruptcy OR restructuring OR layoffs OR loss) 2024 OR 2025 OR 2026',
-        '"{vendor}" ("credit rating" OR DBRS OR S&P OR Moody OR "going-concern" OR "material weakness" OR "default") 2024 OR 2025 OR 2026',
+        '"{vendor}" (site:sedarplus.ca OR "SEDAR+" OR "annual report" OR "MD&A" OR "audited financial") {years}',
+        '"{vendor}" (solvency OR liquidity OR "debt-to-equity" OR "retained earnings" OR bankruptcy OR restructuring OR layoffs OR loss) {years}',
+        '"{vendor}" ("credit rating" OR DBRS OR S&P OR Moody OR "going-concern" OR "material weakness" OR "default") {years}',
     ],
     "reputation": [
-        '"{vendor}" (site:cbc.ca OR site:theglobeandmail.com OR site:nationalpost.com OR site:financialpost.com) (controversy OR fraud OR lawsuit OR scandal OR investigation) 2024 OR 2025 OR 2026',
-        '"{vendor}" (site:canlii.org OR "court records" OR "class action" OR settlement OR misconduct OR penalty OR litigation) 2024 OR 2025 OR 2026',
-        '"{vendor}" (lawsuit OR controversy OR fraud OR scandal OR "adverse media" OR dispute OR boycott) 2024 OR 2025 OR 2026',
+        '"{vendor}" (site:cbc.ca OR site:theglobeandmail.com OR site:nationalpost.com OR site:financialpost.com) (controversy OR fraud OR lawsuit OR scandal OR investigation) {years}',
+        '"{vendor}" (site:canlii.org OR "court records" OR "class action" OR settlement OR misconduct OR penalty OR litigation) {years}',
+        '"{vendor}" (lawsuit OR controversy OR fraud OR scandal OR "adverse media" OR dispute OR boycott) {years}',
     ],
     "key_person": [
-        '"{vendor}" ("CEO" OR founder OR "executive departure" OR "resigned" OR "appointed" OR "board of directors" OR "management") 2024 OR 2025 OR 2026',
+        '"{vendor}" ("CEO" OR founder OR "executive departure" OR "resigned" OR "appointed" OR "board of directors" OR "management") {years}',
         '"{vendor}" (site:sedarplus.ca OR "SEDI" OR "insider filings" OR "management information circular") (officer OR director OR insider)',
-        '"{vendor}" ("OSFI sanctions" OR "OFAC" OR "PEP" OR "disqualified director" OR "director ban" OR "criminal record" OR "fraud") 2024 OR 2025 OR 2026',
+        '"{vendor}" ("OSFI sanctions" OR "OFAC" OR "PEP" OR "disqualified director" OR "director ban" OR "criminal record" OR "fraud") {years}',
     ],
     "cyber": [
-        '"{vendor}" (site:cyber.gc.ca OR "CCCS" OR "Canadian Centre for Cyber Security" OR "CISA" OR "advisory" OR "vulnerability") 2024 OR 2025 OR 2026',
-        '"{vendor}" ("data breach" OR ransomware OR "cyber attack" OR "exposed database" OR HaveIBeenPwned OR BitSight OR leak) 2024 OR 2025 OR 2026',
-        '"{vendor}" (CVE OR "vulnerability" OR "CVSS" OR "unpatched" OR "supply chain attack" OR outage) 2024 OR 2025 OR 2026',
+        '"{vendor}" (site:cyber.gc.ca OR "CCCS" OR "Canadian Centre for Cyber Security" OR "CISA" OR "advisory" OR "vulnerability") {years}',
+        '"{vendor}" ("data breach" OR ransomware OR "cyber attack" OR "exposed database" OR HaveIBeenPwned OR BitSight OR leak) {years}',
+        '"{vendor}" (CVE OR "vulnerability" OR "CVSS" OR "unpatched" OR "supply chain attack" OR outage) {years}',
     ],
     "compliance": [
-        '"{vendor}" ("OSFI" OR "FINTRAC" OR "administrative monetary penalty" OR "AMP" OR "AML/ATF" OR enforcement) 2024 OR 2025 OR 2026',
-        '"{vendor}" ("CSA enforcement" OR "securities commission" OR "OSC" OR "BCSC" OR "AMF" OR "cease-trade" OR penalty) 2024 OR 2025 OR 2026',
-        '"{vendor}" ("Office of the Privacy Commissioner" OR "PIPEDA" OR "CRTC" OR "CASL" OR "Competition Bureau" OR violation) 2024 OR 2025 OR 2026',
+        '"{vendor}" ("OSFI" OR "FINTRAC" OR "administrative monetary penalty" OR "AMP" OR "AML/ATF" OR enforcement) {years}',
+        '"{vendor}" ("CSA enforcement" OR "securities commission" OR "OSC" OR "BCSC" OR "AMF" OR "cease-trade" OR penalty) {years}',
+        '"{vendor}" ("Office of the Privacy Commissioner" OR "PIPEDA" OR "CRTC" OR "CASL" OR "Competition Bureau" OR violation) {years}',
     ],
 }
+
+_YEARS_CLAUSE = " OR ".join(str(y) for y in range(MIN_LOOKBACK_YEAR, CURRENT_YEAR + 1))
 
 PROFILE_QUERIES = [
     '"{vendor}" ("Corporations Canada" OR CBCA OR "headquarters" OR "founded" OR "CEO" OR "about us")',
@@ -167,7 +179,7 @@ def _block(hits: list) -> str:
 def _search_category(cat: str, templates: list, vendor_clean: str, vendor_variants: list, domain_hint: str):
     hits, seen = [], set()
     for tmpl in templates:
-        q = tmpl.replace("{vendor}", vendor_clean)
+        q = tmpl.replace("{vendor}", vendor_clean).replace("{years}", _YEARS_CLAUSE)
         if domain_hint and cat == "cyber":
             q += f' "{domain_hint}"'
         for h in _serper(q, 5):
@@ -178,9 +190,20 @@ def _search_category(cat: str, templates: list, vendor_clean: str, vendor_varian
     return cat, {"text": _block(hits), "urls": [h["url"] for h in hits], "hit_count": len(hits)}
 
 
-def _search_profile(vendor_clean: str, vendor_variants: list, domain_hint: str):
+def _search_profile(vendor_clean: str, vendor_variants: list, domain_hint: str, naics_code: str = "", duns_number: str = ""):
     hits, seen = [], set()
-    for tmpl in PROFILE_QUERIES:
+    queries = list(PROFILE_QUERIES)
+    if naics_code:
+        # SK-VDD-001 Section 4.3: NAICS code, when provided, is used to refine
+        # and disambiguate the search (e.g. two similarly-named entities in
+        # different industries) rather than just being stored unused.
+        queries.append(f'"{vendor_clean}" "NAICS {naics_code}" OR "NAICS code {naics_code}"')
+    if duns_number:
+        # Same Section 4.3 treatment for the D&B D-U-N-S identifier — we have
+        # no D&B API license, but the number itself is still useful as a
+        # disambiguation search term.
+        queries.append(f'"{vendor_clean}" "DUNS {duns_number}" OR "D-U-N-S {duns_number}"')
+    for tmpl in queries:
         q = tmpl.replace("{vendor}", vendor_clean)
         if domain_hint:
             q += f' "{domain_hint}"'
@@ -192,7 +215,8 @@ def _search_profile(vendor_clean: str, vendor_variants: list, domain_hint: str):
 
 
 def collect_vendor_signals(vendor: str, industry: str = "", country: str = "Canada",
-                           company_url: str = "", business_number: str = "", manual_profile: dict = None):
+                           company_url: str = "", business_number: str = "", naics_code: str = "",
+                           duns_number: str = "", manual_profile: dict = None):
     """
     Executes parallel intelligence gathering across all 5 SK-VDD-001 risk dimensions.
     """
@@ -209,7 +233,7 @@ def collect_vendor_signals(vendor: str, industry: str = "", country: str = "Cana
             ex.submit(_search_category, cat, tmpl, vendor_clean, vendor_variants, domain_hint): cat
             for cat, tmpl in SEARCH_QUERIES.items()
         }
-        prof_future = ex.submit(_search_profile, vendor_clean, vendor_variants, domain_hint)
+        prof_future = ex.submit(_search_profile, vendor_clean, vendor_variants, domain_hint, naics_code, duns_number)
 
         for fut in as_completed(cat_futures):
             cat, data = fut.result()

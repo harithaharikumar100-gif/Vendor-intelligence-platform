@@ -26,6 +26,8 @@ from ai_engine import analyze_vendor_full
 from registry_lookup import search_all_registries
 from canlii_search import search_litigation
 from sedarplus_lookup import search_filings
+import config
+import licensed_sources
 
 RISK_CATEGORIES = ["financial", "reputation", "key_person", "cyber", "compliance"]
 
@@ -78,20 +80,25 @@ def _safe_print(msg: str):
 
 
 def get_risk_tier(score: float) -> tuple:
-    """Maps score to SK-VDD-001 4-tier rating band."""
+    """
+    Maps score to SK-VDD-001 4-tier rating band. The High/Critical boundaries
+    are configurable per Section 11 (high_score_threshold, critical_score_threshold);
+    the Low/Medium boundary (25) is fixed by the spec's own band table (Section 7.3).
+    """
     s = int(round(score))
     if s <= 24:
         return "Low", RATING_BANDS["Low"]
-    elif s <= 49:
+    elif s < config.HIGH_SCORE_THRESHOLD:
         return "Medium", RATING_BANDS["Medium"]
-    elif s <= 74:
+    elif s < config.CRITICAL_SCORE_THRESHOLD:
         return "High", RATING_BANDS["High"]
     else:
         return "Critical", RATING_BANDS["Critical"]
 
 
 def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada", concerns: str = "",
-                        company_url: str = "", business_number: str = "", ticker: str = "") -> tuple:
+                        company_url: str = "", business_number: str = "", ticker: str = "",
+                        duns_number: str = "", naics_code: str = "") -> tuple:
     """
     Executes end-to-end SK-VDD-001 Due Diligence Pipeline.
     """
@@ -107,7 +114,9 @@ def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada"
                 industry=industry,
                 country=country,
                 company_url=company_url,
-                business_number=business_number
+                business_number=business_number,
+                naics_code=naics_code,
+                duns_number=duns_number,
             )
 
         def _finance():
@@ -241,8 +250,9 @@ def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada"
 
         # Check for Critical score escalation
         escalations = result.get("automatic_escalations", [])
-        if overall >= 75 and "Overall Vendor Risk Score >= 75 (Critical rating)" not in escalations:
-            escalations.append("Overall Vendor Risk Score >= 75 (Critical rating)")
+        _crit_msg = f"Overall Vendor Risk Score >= {config.CRITICAL_SCORE_THRESHOLD} (Critical rating)"
+        if overall >= config.CRITICAL_SCORE_THRESHOLD and _crit_msg not in escalations:
+            escalations.append(_crit_msg)
 
         # SK-VDD-001 Section 10.1: Entity Disambiguation Escalation
         # Flag if profile search results point to 2+ distinct company websites (excluding info aggregators)
@@ -280,6 +290,8 @@ def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada"
         result["raw_vendor_name"] = vendor
         result["registration_country"] = country
         result["business_number"] = business_number
+        result["duns_number"] = duns_number
+        result["naics_code"] = naics_code
         result["query_date"] = datetime.utcnow().strftime("%Y-%m-%d")
 
         # Canonical Section 8 Schema Aliases
@@ -308,7 +320,7 @@ def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada"
         # SK-VDD-001 Section 9.2: Private company confidence flag
         # Private companies (no ticker, no SEC/SEDAR+ financials) get reduced confidence
         has_ticker = bool(ticker.strip() or financial_metrics.get("ticker"))
-        if not has_ticker or not has_metrics:
+        if config.PRIVATE_CO_CONFIDENCE_FLAG and (not has_ticker or not has_metrics):
             result["private_co_confidence_flag"] = "Reduced"
             confidence = max(confidence - 15, 30)
         else:
@@ -317,15 +329,61 @@ def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada"
         result["confidence_score"] = confidence
 
         # Source Health Tracking (SK-VDD-001 Section 5 & 10.2)
+        federal_found = registry_data.get("registries", {}).get("federal_registry", {}).get("found", False)
+        provincial_found = registry_data.get("registries", {}).get("provincial_registry", {}).get("found", False)
         result["source_health"] = {
-            "corporations_canada": registry_data.get("registries", {}).get("federal_registry", {}).get("found", False),
-            "provincial_registry": registry_data.get("registries", {}).get("provincial_registry", {}).get("found", False),
+            "corporations_canada": federal_found,
+            "provincial_registry": provincial_found,
             "canlii_litigation": registry_data.get("litigation", {}).get("total", 0) > 0,
             "sedarplus_filings": registry_data.get("filings", {}).get("total", 0) > 0,
             "serper_search": bool(data.get("meta")),
             "yfinance": bool(financial_metrics),
             "corporate_profile": bool(prof_extras),
         }
+
+        # SK-VDD-001 Section 3.3 step 2 (Jurisdiction Confirmation) + Section 10.2
+        # (Intelligence Run Failure Handling), unified into one jurisdiction gate.
+        #
+        # Section 2.2 scopes this skill to "Canadian-registered or Canada-domiciled
+        # vendors" — everything else is out of scope. Section 10.2 says a critical
+        # source outage means "the run shall not be presented as complete." This is
+        # a synchronous request/response API with no admin-alert channel, so
+        # "pause"/"gate" is implemented as an explicit, unmistakable flag +
+        # escalation + confidence cap rather than blocking the response outright —
+        # consistent with Section 9.3's "Human Oversight: NIVETA shall not
+        # autonomously approve or reject a vendor." The human reviewer is told
+        # plainly the jurisdiction is unconfirmed/out of scope instead of the
+        # output silently implying full confidence.
+        is_canada_scope = country.strip().lower() in ("canada", "ca")
+
+        if not is_canada_scope:
+            result["jurisdiction_gate"] = "out_of_scope_non_canada"
+            result["jurisdiction_confirmed"] = False
+            result["run_status"] = "complete_out_of_scope"
+            result["confidence_score"] = min(result["confidence_score"], 40)
+            result.setdefault("automatic_escalations", []).append(
+                f"OUT OF SKILL SCOPE (Section 2.2): this skill covers Canadian-registered/domiciled "
+                f"vendors only — '{country}' is outside scope. Results are informational and have not "
+                f"been validated against any Canadian registry or regulatory source."
+            )
+        elif not federal_found and not provincial_found:
+            result["jurisdiction_gate"] = "unconfirmed_canadian_registration"
+            result["jurisdiction_confirmed"] = False
+            result["run_status"] = "degraded_critical_source_unavailable"
+            result.setdefault("automatic_escalations", []).append(
+                "JURISDICTION UNCONFIRMED (Section 10.2): neither Corporations Canada (CBCA) nor a "
+                "provincial registry could confirm this entity's Canadian registration — treat as "
+                "unverified until a human reviewer confirms jurisdiction directly."
+            )
+        else:
+            result["jurisdiction_gate"] = "confirmed_canadian"
+            result["jurisdiction_confirmed"] = True
+            result["run_status"] = "complete"
+
+        # Section 11 max_news_articles_logged: cap retained adverse media articles.
+        _rep_articles = result.get("explanations", {}).get("reputation", {}).get("articles", [])
+        if isinstance(_rep_articles, list) and len(_rep_articles) > config.MAX_NEWS_ARTICLES_LOGGED:
+            result["explanations"]["reputation"]["articles"] = _rep_articles[:config.MAX_NEWS_ARTICLES_LOGGED]
 
         # ── Final Data Completeness Assurance Layer (Section 8 Canonical Schema) ──
         # Ensure 100% of required fields exist; never return empty arrays or nulls
@@ -385,13 +443,16 @@ def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada"
                 "Obtain directors' and officers' (D&O) liability insurance certificate evidence with minimum $5M limit additional insured endorsement."
             ]
 
-        if not result.get("data_gaps") or not isinstance(result["data_gaps"], list) or len(result["data_gaps"]) < 3:
-            result["data_gaps"] = [
+        # data_gaps (Section 8) is meant to reflect real sources that could not
+        # be accessed (Section 9.2 licensed-source gaps + Section 10.2 source
+        # failures), which ai_engine.analyze_vendor_full now populates. Only
+        # backfill with generic follow-up items if it's genuinely empty —
+        # don't drown 1-2 real gaps under 5 boilerplate ones.
+        if not result.get("data_gaps") or not isinstance(result["data_gaps"], list) or len(result["data_gaps"]) == 0:
+            result["data_gaps"] = licensed_sources.all_missing_data_gaps() or [
                 "Vendor SOC 2 Type II / ISO 27001 third-party security audit report direct attestation requested from counterparty.",
                 "Direct receipt of most recent audited annual financial statements and auditor opinion sign-off page.",
                 "Executive background screening completion for all key decision makers (Level 2 Enhanced Due Diligence scope).",
-                "Cyber insurance policy coverage limits, carrier confirmation, and additional insured endorsement documentation review.",
-                "Primary banking relationship and trade reference verification direct from counterparty financial institutions."
             ]
 
         if not result.get("data_sources_used") or not isinstance(result["data_sources_used"], list):

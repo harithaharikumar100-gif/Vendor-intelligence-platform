@@ -5,23 +5,22 @@ export default function EscalationBanner({ escalations = [] }) {
   if (!escalations || escalations.length === 0) return null;
 
   return (
-    <div className="bg-rose-950/40 border border-rose-500/40 rounded-xl p-4 mb-6 shadow-xl">
+    <div className="border border-tier-critical/25 bg-tier-critical/[0.04] rounded-xl p-4">
       <div className="flex items-start gap-3">
-        <div className="p-2 rounded-lg bg-rose-500/20 text-rose-400 shrink-0 mt-0.5">
-          <AlertTriangle size={20} />
-        </div>
+        <AlertTriangle size={16} className="text-tier-critical shrink-0 mt-0.5" />
         <div className="flex-1">
-          <h4 className="text-sm font-bold text-rose-300 uppercase tracking-wider">
-            Automatic Senior Risk Review Escalation Triggered (SK-VDD-001 Section 10.1)
+          <h4 className="text-[13px] font-medium text-ink-50">
+            Automatic senior risk review escalation triggered
+            <span className="text-ink-500 font-normal"> · SK-VDD-001 Section 10.1</span>
           </h4>
-          <p className="text-xs text-rose-200/80 mt-0.5">
+          <p className="text-xs text-ink-400 mt-1">
             The platform identified critical conditions requiring mandatory human validation before onboarding:
           </p>
-          <ul className="mt-2 space-y-1 text-xs text-rose-200">
+          <ul className="mt-2.5 space-y-1.5 text-xs text-ink-200">
             {escalations.map((esc, i) => (
-              <li key={i} className="flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-rose-400" />
-                <span className="font-semibold">{esc}</span>
+              <li key={i} className="flex items-start gap-2">
+                <span className="w-1 h-1 rounded-full bg-tier-critical mt-1.5 shrink-0" />
+                <span>{esc}</span>
               </li>
             ))}
           </ul>

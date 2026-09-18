@@ -46,21 +46,38 @@ def _safe_print(msg: str):
 # ─── low-level helpers ────────────────────────────────────────────────────────
 
 def _serper(query: str, num: int = 5) -> list:
+    """
+    Performs a Serper Google Search with 3-retry exponential backoff, per
+    SK-VDD-001 Section 10.2 ("NIVETA shall retry failed source queries up
+    to three times with exponential backoff before logging a gap").
+    """
     if not SERPER_API_KEY:
         return []
-    try:
-        session = requests.Session()
-        session.mount('https://', SSLAdapter())
-        r = session.post(
-            "https://google.serper.dev/search",
-            json={"q": query, "num": num},
-            headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
-            timeout=12,
-        )
-        return r.json().get("organic", [])
-    except Exception as e:
-        _safe_print(f"  [!] Serper [{query[:40]}]: {e}")
-        return []
+    for attempt in range(3):
+        try:
+            session = requests.Session()
+            session.mount('https://', SSLAdapter())
+            r = session.post(
+                "https://google.serper.dev/search",
+                json={"q": query, "num": num},
+                headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
+                timeout=12,
+            )
+            if r.status_code == 200:
+                return r.json().get("organic", [])
+            if r.status_code in (429, 500, 502, 503) and attempt < 2:
+                import time as _time
+                _time.sleep(2 ** attempt)
+                continue
+            return []
+        except Exception as e:
+            if attempt < 2:
+                import time as _time
+                _time.sleep(2 ** attempt)
+                continue
+            _safe_print(f"  [!] Serper failed after 3 retries [{query[:40]}]: {e}")
+            return []
+    return []
 
 
 def _webpage(url: str, chars: int = 8000) -> str:
@@ -195,14 +212,23 @@ def _yfinance(ticker: str) -> dict:
     try:
         import yfinance as yf
         
-        ticker_variants = [ticker]
-        if not ticker.endswith(".TO") and ("-" not in ticker):
-            ticker_variants.append(f"{ticker}.TO")
-        if "." in ticker and not ticker.endswith(".TO"):
-            ticker_variants.append(ticker.replace(".", "-"))
-        if "-" in ticker:
-            ticker_variants.append(ticker.replace("-", "."))
-        
+        # TSX dual-class tickers (e.g. Bombardier "BBD.B", CGI "GIB.A") use a
+        # HYPHEN before the exchange suffix on Yahoo Finance: "BBD-B.TO", not
+        # "BBD.B.TO" (a malformed double-suffix that 404s) and not "BBD-B"
+        # alone (missing the .TO suffix, which also 404s — verified directly
+        # against Yahoo: only the hyphen+.TO form actually resolves).
+        # Strip any existing ".TO" first so it isn't corrupted by the class-
+        # separator conversion below (naively replacing every "." with "-"
+        # would turn an already-correct "BBD-B.TO" into "BBD-B-TO").
+        base = ticker[:-3] if ticker.upper().endswith(".TO") else ticker
+        hyphen_base = base.replace(".", "-") if "." in base else base
+        dot_base = base.replace("-", ".") if "-" in base else base
+
+        ticker_variants = []
+        for v in [f"{hyphen_base}.TO", ticker, f"{base}.TO", hyphen_base, dot_base]:
+            if v and v not in ticker_variants:
+                ticker_variants.append(v)
+
         info = {}
         resolved_ticker = ""
         for t_variant in ticker_variants:

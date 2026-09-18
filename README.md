@@ -19,9 +19,11 @@ vendoriq/
 ├── scraper.py            # Parallel scraping: SEDAR+, CBCA, CBC, Globe & Mail, CCCS, CISA, CanLII
 ├── normalizer.py         # Suffix stripping, acronym expansion & BN validation
 ├── financial_fetcher.py  # yfinance & public filing ratio extraction
-├── charts.py             # Plotly charts (Radar, Gauges, Donut)
+├── cyber_intel.py        # Real NVD CVE + CISA KEV Catalogue integrations
+├── sanctions_check.py    # Real OFAC SDN sanctions list cross-reference
+├── licensed_sources.py   # Licensed-source (BitSight/Refinitiv/etc.) gap disclosure
+├── config.py             # Section 11 configurable skill parameters (env-driven)
 ├── pdf_generator.py      # Official SK-VDD-001 PDF Summary Report generator
-├── app.py                # (Optional) Legacy Streamlit UI
 └── .env                  # API keys (GROQ_API_KEY, SERPER_API_KEY)
 ```
 ---
@@ -81,21 +83,18 @@ Active regulatory prohibition or cease-and-desist order
 ---
 Tech Stack
 Layer	Technology
-UI	React 18 + Tailwind CSS + Recharts (primary) · Streamlit (legacy, optional)
+UI	React 18 + Tailwind CSS + Recharts
 Backend	FastAPI
-AI Model	Groq — dynamic model discovery (e.g. `openai/gpt-oss-120b`)
+AI Model	Gemini → Groq → OpenAI auto-failover (dynamic model discovery)
 Web Search	Serper API
 Financial Data	yfinance (listed) / web scrape (private)
-Charts	Plotly / Recharts
+Charts	Recharts
 PDF Export	ReportLab (two-pass canvas for page numbering)
 Parallelism	`concurrent.futures.ThreadPoolExecutor`
 ---
 Requirements
 ```
-streamlit
 groq
-plotly
-pandas
 reportlab
 yfinance
 requests

@@ -7,38 +7,40 @@ export default {
   theme: {
     extend: {
       colors: {
-        background: "#060911",
+        // Modern minimal black theme: true-black canvas, near-black surfaces,
+        // hairline borders. Color is reserved for risk severity only — all
+        // UI chrome (buttons, chips, focus rings) is monochrome.
+        background: "#000000",
         surface: {
-          DEFAULT: "#0d1322",
-          hover: "#141c30",
-          card: "#0f172a",
+          DEFAULT: "#0a0a0a",
+          hover: "#121212",
+          card: "#0d0d0d",
         },
         border: {
-          DEFAULT: "#1a233a",
-          light: "#283554",
+          DEFAULT: "#1f1f1f",
+          light: "#2e2e2e",
+        },
+        ink: {
+          50: "#fafafa",
+          200: "#d4d4d4",
+          400: "#8a8a8a",
+          500: "#6b6b6b",
+          700: "#3a3a3a",
         },
         tier: {
-          low: "#10b981",
-          medium: "#f59e0b",
+          low: "#22c55e",
+          medium: "#eab308",
           high: "#f97316",
           critical: "#ef4444",
         },
-        brand: {
-          50: "#f0f9ff",
-          100: "#e0f2fe",
-          400: "#38bdf8",
-          500: "#0ea5e9",
-          600: "#0284c7",
-          700: "#0369a1",
-        }
       },
       fontFamily: {
-        sans: ['Plus Jakarta Sans', '-apple-system', 'sans-serif'],
+        sans: ['Inter', '-apple-system', 'sans-serif'],
         mono: ['JetBrains Mono', 'monospace'],
       },
       borderRadius: {
-        'xl': '12px',
-        '2xl': '16px',
+        'xl': '10px',
+        '2xl': '14px',
       }
     },
   },

@@ -22,33 +22,33 @@ export default function RadarChart({ scores }) {
     <div className="w-full h-72">
       <ResponsiveContainer width="100%" height="100%">
         <RechartsRadar cx="50%" cy="50%" outerRadius="75%" data={data}>
-          <PolarGrid stroke="#1a233a" />
+          <PolarGrid stroke="#1f1f1f" />
           <PolarAngleAxis
             dataKey="subject"
-            tick={{ fill: '#94a3b8', fontSize: 11, fontFamily: 'Plus Jakarta Sans' }}
+            tick={{ fill: '#8a8a8a', fontSize: 11, fontFamily: 'Inter' }}
           />
           <PolarRadiusAxis
             angle={30}
             domain={[0, 100]}
-            tick={{ fill: '#64748b', fontSize: 9 }}
-            stroke="#1a233a"
+            tick={{ fill: '#6b6b6b', fontSize: 9 }}
+            stroke="#1f1f1f"
           />
           <Radar
             name="Vendor Risk"
             dataKey="value"
-            stroke="#38bdf8"
-            fill="#38bdf8"
-            fillOpacity={0.25}
-            dot={{ r: 4, fill: '#38bdf8' }}
+            stroke="#fafafa"
+            fill="#fafafa"
+            fillOpacity={0.08}
+            dot={{ r: 3, fill: '#fafafa' }}
           />
           <Tooltip
             content={({ active, payload }) => {
               if (active && payload && payload.length) {
                 const d = payload[0].payload;
                 return (
-                  <div className="bg-slate-900 border border-slate-700 px-3 py-1.5 rounded-lg shadow-xl text-xs">
-                    <p className="font-semibold text-sky-400">{d.subject}</p>
-                    <p className="text-slate-200">Score: <span className="font-mono font-bold">{d.value}</span> / 100</p>
+                  <div className="bg-surface-card border border-border-light px-3 py-1.5 rounded-lg text-xs">
+                    <p className="font-medium text-ink-50">{d.subject}</p>
+                    <p className="text-ink-400">Score: <span className="font-mono font-medium text-ink-50">{d.value}</span> / 100</p>
                   </div>
                 );
               }

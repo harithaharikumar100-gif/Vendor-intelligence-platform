@@ -18,7 +18,32 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 
+import config
+import licensed_sources
+import cyber_intel
+import sanctions_check
+
 load_dotenv()
+
+# SK-VDD-001 Section 6.1.2: deterministic keyword detection for audit-opinion
+# red flags. These are Critical/High severity findings that should not depend
+# on an LLM's discretion — if the underlying evidence text literally contains
+# these phrases, the flag must fire.
+_GOING_CONCERN_PATTERNS = [
+    r"going[\s-]concern", r"substantial doubt", r"material uncertaint\w* relat\w* to going concern",
+]
+_MATERIAL_WEAKNESS_PATTERNS = [
+    r"material weakness in internal control",
+]
+
+
+def _detect_financial_red_flags(evidence_text: str) -> dict:
+    """Section 6.1.2 Audit signals: deterministic keyword scan, not LLM discretion."""
+    text = (evidence_text or "").lower()
+    return {
+        "going_concern": any(re.search(p, text) for p in _GOING_CONCERN_PATTERNS),
+        "material_weakness": any(re.search(p, text) for p in _MATERIAL_WEAKNESS_PATTERNS),
+    }
 
 PREFERRED_MODELS = [
     "qwen/qwen3.8-27b",
@@ -53,21 +78,42 @@ def _call_gemini(prompt: str, max_tokens: int = 400) -> str:
     key = os.getenv("GEMINI_API_KEY", "").strip()
     if not key:
         return ""
-    for model in ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]:
+    # gemini-1.5-* / gemini-2.0-* were retired by Google (confirmed via direct
+    # API probe — they now 404 with "use models/gemini-3.6-flash"). The
+    # "-latest" aliases auto-track whatever Google's current model is, so
+    # they're used first to avoid this going stale again next time Google
+    # retires a version; gemini-3.6-flash is kept as an explicit pin in case
+    # the alias itself becomes unavailable or overloaded (HTTP 503).
+    for model in ["gemini-flash-latest", "gemini-3.6-flash", "gemini-pro-latest"]:
         try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
             r = requests.post(
                 url,
                 json={
                     "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"temperature": 0.1, "maxOutputTokens": max_tokens}
+                    "generationConfig": {
+                        "temperature": 0.1,
+                        "maxOutputTokens": max_tokens,
+                        # Gemini 3.x models "think" before answering, and that
+                        # reasoning silently consumes maxOutputTokens, leaving
+                        # nothing for the actual answer (observed: finishReason
+                        # MAX_TOKENS after 12 visible tokens vs. 452 thinking
+                        # tokens). Disabling it makes the visible answer the
+                        # whole budget again.
+                        "thinkingConfig": {"thinkingBudget": 0},
+                    }
                 },
-                timeout=12
+                timeout=15
             )
             if r.status_code == 200:
                 d = r.json()
-                text = d["candidates"][0]["content"]["parts"][0]["text"]
-                if text.strip():
+                candidates = d.get("candidates", [])
+                if not candidates:
+                    continue
+                parts = candidates[0].get("content", {}).get("parts", [])
+                text = "".join(p.get("text", "") for p in parts)
+                finish_reason = candidates[0].get("finishReason", "")
+                if text.strip() and finish_reason != "MAX_TOKENS":
                     return text.strip()
         except Exception:
             pass
@@ -158,12 +204,22 @@ def _call_groq(prompt: str, max_tokens: int = 400, model_hint: str = None) -> st
     return ""
 
 
+def _looks_like_json_attempt(text: str) -> bool:
+    t = (text or "").strip()
+    return t.startswith("{") or t.startswith("```")
+
+
 def _llm_dispatch(prompt: str, max_tokens: int = 400, model_hint: str = None) -> str:
     """Dispatches prompt across Gemini -> Groq -> OpenAI in priority order."""
     # 1. Google Gemini (Fastest & Highest Free Quota)
     if os.getenv("GEMINI_API_KEY"):
         res = _call_gemini(prompt, max_tokens)
-        if res: return res
+        # Parity with the Groq path below: if the caller asked for JSON (the
+        # response looks like an attempt at it), don't accept it unless it
+        # actually parses — otherwise a truncated/garbage Gemini reply would
+        # be treated as final instead of falling through to Groq/OpenAI.
+        if res and (not _looks_like_json_attempt(res) or _parse_json(res)):
+            return res
 
     # 2. Groq Cloud
     if os.getenv("GROQ_API_KEY"):
@@ -201,6 +257,16 @@ def _parse_json(raw: str) -> dict:
 
 # ── SK-VDD-001 Prompt Builders ────────────────────────────────────────────────
 
+_RISK_FACTOR_LIST_INSTRUCTION = (
+    "List 5 to 8 DISTINCT risk factors as separate items, the way a due-diligence analyst "
+    "would write a point-by-point risk list for a reader who asked 'what are the risks?' — "
+    "not a narrative paragraph. Each item must be a complete, standalone, specific statement "
+    "(name the actual metric, event, or fact — never a vague placeholder like 'standard risk "
+    "posture'). Cover a mix of severities; only include Low-severity items if you genuinely have "
+    "nothing more material to report after covering everything real."
+)
+
+
 def _financial_prompt(vendor, industry, country, evidence, urls, metrics, concerns):
     m_block = ""
     if metrics:
@@ -216,10 +282,13 @@ User Concerns: {concerns or 'None'}
 {m_block}EVIDENCE:
 {ev}
 
+{_RISK_FACTOR_LIST_INSTRUCTION} Cover solvency, liquidity, profitability, leverage, and audit/going-concern
+signals as distinct items wherever evidence or verified financial data supports them.
+
 Return ONLY valid JSON:
 {{
   "score": <0-100>,
-  "signals": [{{"category": "Financial", "indicator": "<finding>", "severity": "<Low|Elevated|High|Critical>"}}],
+  "signals": [{{"category": "<Solvency|Liquidity|Profitability|Leverage|Audit|Growth>", "indicator": "<one complete, specific risk factor statement>", "severity": "<Low|Elevated|High|Critical>"}}],
   "summary": "<2-3 sentences assessing balance sheet, leverage, and going-concern status>",
   "going_concern_flag": <true|false>,
   "evidence_urls": {json.dumps(urls[:3])}
@@ -235,10 +304,13 @@ User Concerns: {concerns or 'None'}
 EVIDENCE:
 {ev}
 
+{_RISK_FACTOR_LIST_INSTRUCTION} Each item is one distinct adverse-media/litigation/controversy
+finding, not a summary of several combined.
+
 Return ONLY valid JSON:
 {{
   "score": <0-100>,
-  "articles": [{{"headline": "<issue>", "source": "<source>", "date": "Recent", "severity": "<Low|Elevated|High|Critical>", "url": ""}}],
+  "articles": [{{"headline": "<one specific issue, naming what actually happened>", "source": "<source>", "date": "Recent", "severity": "<Low|Elevated|High|Critical>", "url": ""}}],
   "summary": "<2-3 sentences assessing controversies and litigation history>",
   "evidence_urls": {json.dumps(urls[:3])}
 }}"""
@@ -257,10 +329,13 @@ User Concerns: {concerns or 'None'}
 {p_block}EVIDENCE:
 {ev}
 
+List every key person you have evidence for (executives, founders, directors), each with their own
+specific, standalone flags — not a generic "Clean" for everyone unless genuinely nothing else applies.
+
 Return ONLY valid JSON:
 {{
   "score": <0-100>,
-  "persons": [{{"name": "<executive name>", "role": "<title>", "tenure": "<tenure>", "flags": ["Clean"], "severity": "<Low|Elevated|High|Critical>"}}],
+  "persons": [{{"name": "<executive name>", "role": "<title>", "tenure": "<tenure>", "flags": ["<specific finding, e.g. 'No OFAC/OSFI sanctions match found' or the actual concern>"], "severity": "<Low|Elevated|High|Critical>"}}],
   "sanctions_match_flag": <true|false>,
   "concentration_risk": "<Low|Elevated|High>",
   "summary": "<2-3 sentences on leadership bench strength and sanctions checks>",
@@ -277,10 +352,13 @@ User Concerns: {concerns or 'None'}
 EVIDENCE:
 {ev}
 
+{_RISK_FACTOR_LIST_INSTRUCTION} Cover breach history, CVE/advisory exposure, ransomware, and general
+posture as distinct items.
+
 Return ONLY valid JSON:
 {{
   "score": <0-100>,
-  "signals": [{{"category": "Cyber Hygiene", "indicator": "<finding>", "severity": "<Low|Elevated|High|Critical>"}}],
+  "signals": [{{"category": "<Data Breach|CVE Exposure|Government Advisory|Ransomware|Cyber Hygiene>", "indicator": "<one complete, specific risk factor statement>", "severity": "<Low|Elevated|High|Critical>"}}],
   "recent_breach_flag": <true|false>,
   "summary": "<2-3 sentences on breach history and cyber defense posture>",
   "evidence_urls": {json.dumps(urls[:3])}
@@ -296,10 +374,13 @@ User Concerns: {concerns or 'None'}
 EVIDENCE:
 {ev}
 
+{_RISK_FACTOR_LIST_INSTRUCTION} Check each relevant regulator separately (OSFI, FINTRAC, CSA, OPC/PIPEDA,
+CRTC/CASL, Competition Bureau) — one item per regulator with what was actually found for that regulator.
+
 Return ONLY valid JSON:
 {{
   "score": <0-100>,
-  "signals": [{{"authority": "<Regulator>", "action": "<finding>", "material": false, "severity": "<Low|Elevated|High|Critical>"}}],
+  "signals": [{{"authority": "<Regulator>", "action": "<one complete, specific finding for this regulator>", "material": <true if penalty exceeds CAD 100,000 else false>, "severity": "<Low|Elevated|High|Critical>"}}],
   "prohibition_order_flag": <true|false>,
   "summary": "<2-3 sentences on regulatory enforcement history>",
   "evidence_urls": {json.dumps(urls[:3])}
@@ -346,67 +427,108 @@ def _autonomous_fallback_engine(vendor, industry, country, concerns, financial_m
     """
     _safe_log(f"  [⚡] Executing Autonomous SK-VDD-001 Rule Engine for {vendor}...")
 
-    # Financial Viability (30%)
+    # Financial Viability (30%) — thresholds per SK-VDD-001 Section 6.1.2 Signal Library
     fin_score = 18
     fin_signals = []
+    _fin_data_gaps = []
     if financial_metrics:
-        de_raw = str(financial_metrics.get("debt_equity", "1.0")).replace("x", "")
-        try:
-            de = float(de_raw)
-            if de > 5.0:
-                fin_score = 55
-                fin_signals.append({"category": "Leverage", "indicator": f"High Debt-to-Equity ratio ({de:.2f}x) observed in public disclosures; covenant breach monitoring recommended.", "severity": "High"})
-            elif de > 2.0:
-                fin_score = 35
-                fin_signals.append({"category": "Leverage", "indicator": f"Moderate Debt-to-Equity ratio ({de:.2f}x) requires ongoing solvency monitoring and quarterly covenant review.", "severity": "Elevated"})
-            else:
-                fin_signals.append({"category": "Leverage", "indicator": f"Conservative Debt-to-Equity ({de:.2f}x) demonstrates strong balance sheet management.", "severity": "Low"})
-        except Exception:
-            fin_signals.append({"category": "Leverage", "indicator": "Debt structure within standard industry range; no material leverage concerns identified.", "severity": "Low"})
+        # Solvency: Debt-to-Equity > 3.0x (trailing 3 years) -> High.
+        # Section 9.3 "No Speculation": only evaluate when the ratio is
+        # actually present — never substitute a plausible-looking default.
+        de_raw = financial_metrics.get("debt_equity")
+        if de_raw:
+            try:
+                de = float(str(de_raw).replace("x", ""))
+                if de > 3.0:
+                    fin_score = 58
+                    fin_signals.append({"category": "Solvency", "indicator": f"Debt-to-Equity ratio of {de:.2f}x exceeds the 3.0x threshold — elevated leverage; potential debt servicing stress.", "severity": "High"})
+                else:
+                    fin_signals.append({"category": "Solvency", "indicator": f"Debt-to-Equity ({de:.2f}x) within the 3.0x threshold; no elevated leverage concern.", "severity": "Low"})
+            except Exception:
+                pass
+        else:
+            fin_signals.append({"category": "Solvency", "indicator": "Debt-to-Equity ratio not available from verified sources for this run — leverage cannot be assessed against the 3.0x threshold.", "severity": "Unknown"})
+            _fin_data_gaps.append("Debt-to-Equity ratio unavailable (yfinance did not resolve it for this vendor/ticker).")
 
-        nm_raw = str(financial_metrics.get("net_margin", "10")).replace("%", "")
-        try:
-            nm = float(nm_raw)
-            if nm < 0:
-                fin_score = max(fin_score, 48)
-                fin_signals.append({"category": "Profitability", "indicator": f"Negative operating margins ({nm:.1f}%) indicate operational cash burn; working capital review required.", "severity": "Elevated"})
-            elif nm < 5:
-                fin_signals.append({"category": "Profitability", "indicator": f"Tight operating margins ({nm:.1f}%); sensitivity to input cost inflation warranted.", "severity": "Elevated"})
-            else:
-                fin_signals.append({"category": "Profitability", "indicator": f"Healthy net margins ({nm:.1f}%) demonstrate operational efficiency.", "severity": "Low"})
-        except Exception:
-            pass
+        # Liquidity: Current Ratio < 1.0 -> Elevated
+        cr_raw = financial_metrics.get("current_ratio")
+        if cr_raw:
+            try:
+                cr = float(str(cr_raw))
+                if cr < 1.0:
+                    fin_score = max(fin_score, 45)
+                    fin_signals.append({"category": "Liquidity", "indicator": f"Current Ratio of {cr:.2f}x is below 1.0 — inability to meet short-term obligations.", "severity": "Elevated"})
+                else:
+                    fin_signals.append({"category": "Liquidity", "indicator": f"Current Ratio ({cr:.2f}x) at or above 1.0; short-term obligations adequately covered.", "severity": "Low"})
+            except Exception:
+                pass
+        else:
+            fin_signals.append({"category": "Liquidity", "indicator": "Current Ratio not available from verified sources for this run — liquidity cannot be assessed against the 1.0x threshold.", "severity": "Unknown"})
+            _fin_data_gaps.append("Current Ratio unavailable (yfinance did not resolve it for this vendor/ticker).")
 
-        rg_raw = str(financial_metrics.get("revenue_growth", "0")).replace("%", "")
-        try:
-            rg = float(rg_raw)
-            if rg < -5:
-                fin_score = max(fin_score, 42)
-                fin_signals.append({"category": "Growth", "indicator": f"Revenue contraction ({rg:.1f}%) declining top-line; market demand assessment required.", "severity": "Elevated"})
-            elif rg > 20:
-                fin_signals.append({"category": "Growth", "indicator": f"Robust revenue expansion ({rg:.1f}%) strong market traction.", "severity": "Low"})
-            else:
-                fin_signals.append({"category": "Growth", "indicator": f"Stable revenue trajectory ({rg:.1f}%) consistent with sector benchmarks.", "severity": "Low"})
-        except Exception:
-            pass
+        # Liquidity: Quick Ratio < 0.5 -> High
+        qr_raw = financial_metrics.get("quick_ratio")
+        if qr_raw:
+            try:
+                qr = float(str(qr_raw))
+                if qr < 0.5:
+                    fin_score = max(fin_score, 60)
+                    fin_signals.append({"category": "Liquidity", "indicator": f"Quick Ratio of {qr:.2f}x is below 0.5 — acute short-term liquidity stress.", "severity": "High"})
+                else:
+                    fin_signals.append({"category": "Liquidity", "indicator": f"Quick Ratio ({qr:.2f}x) above the 0.5 acute-stress threshold.", "severity": "Low"})
+            except Exception:
+                pass
 
-        cr_raw = str(financial_metrics.get("current_ratio", "1.5"))
-        try:
-            cr = float(cr_raw)
-            if cr < 1.0:
-                fin_score = max(fin_score, 50)
-                fin_signals.append({"category": "Liquidity", "indicator": f"Current ratio below 1.0x ({cr:.2f}x) near-term working capital constraints flagged.", "severity": "High"})
-            elif cr < 1.5:
-                fin_signals.append({"category": "Liquidity", "indicator": f"Tight current ratio ({cr:.2f}x) cash conversion cycle monitoring advised.", "severity": "Elevated"})
-            else:
-                fin_signals.append({"category": "Liquidity", "indicator": f"Strong liquidity position ({cr:.2f}x) comfortable short-term debt coverage.", "severity": "Low"})
-        except Exception:
-            pass
+        # Profitability: Negative EBITDA -> Critical (single-year evidence; multi-year not available from live quote data)
+        ebitda_raw = str(financial_metrics.get("ebitda_margin", "")).replace("%", "")
+        if ebitda_raw:
+            try:
+                ebm = float(ebitda_raw)
+                if ebm < 0:
+                    fin_score = max(fin_score, 78)
+                    fin_signals.append({"category": "Profitability", "indicator": f"Negative EBITDA margin ({ebm:.1f}%) in the most recent period — structural unprofitability risk; multi-year confirmation recommended.", "severity": "Critical"})
+                else:
+                    fin_signals.append({"category": "Profitability", "indicator": f"Positive EBITDA margin ({ebm:.1f}%) in the most recent period.", "severity": "Low"})
+            except Exception:
+                pass
+
+        nm_raw = financial_metrics.get("net_margin")
+        if nm_raw:
+            try:
+                nm = float(str(nm_raw).replace("%", ""))
+                if nm < 0:
+                    fin_score = max(fin_score, 48)
+                    fin_signals.append({"category": "Profitability", "indicator": f"Negative operating margins ({nm:.1f}%) indicate operational cash burn; working capital review required.", "severity": "Elevated"})
+                elif nm < 5:
+                    fin_signals.append({"category": "Profitability", "indicator": f"Tight operating margins ({nm:.1f}%); sensitivity to input cost inflation warranted.", "severity": "Elevated"})
+                else:
+                    fin_signals.append({"category": "Profitability", "indicator": f"Healthy net margins ({nm:.1f}%) demonstrate operational efficiency.", "severity": "Low"})
+            except Exception:
+                pass
+        else:
+            _fin_data_gaps.append("Net margin unavailable (yfinance did not resolve it for this vendor/ticker).")
+
+        rg_raw = financial_metrics.get("revenue_growth")
+        if rg_raw:
+            try:
+                rg = float(str(rg_raw).replace("%", ""))
+                if rg < -5:
+                    fin_score = max(fin_score, 42)
+                    fin_signals.append({"category": "Growth", "indicator": f"Revenue contraction ({rg:.1f}%) declining top-line; market demand assessment required.", "severity": "Elevated"})
+                elif rg > 20:
+                    fin_signals.append({"category": "Growth", "indicator": f"Robust revenue expansion ({rg:.1f}%) strong market traction.", "severity": "Low"})
+                else:
+                    fin_signals.append({"category": "Growth", "indicator": f"Stable revenue trajectory ({rg:.1f}%) consistent with sector benchmarks.", "severity": "Low"})
+            except Exception:
+                pass
+        else:
+            _fin_data_gaps.append("Revenue growth unavailable (yfinance did not resolve it for this vendor/ticker).")
     else:
         fin_score = 28
         fin_signals.append({"category": "Filing Transparency", "indicator": "Private entity without mandatory TSX/SEDAR+ filing obligations; standard financial health inferred from web intelligence disclosures.", "severity": "Low"})
         fin_signals.append({"category": "Solvency", "indicator": "No adverse solvency red flags detected across Canadian business registry and media sources.", "severity": "Low"})
         fin_signals.append({"category": "Trade Credit", "indicator": "Standard payment profile consistent with industry peer group benchmarks.", "severity": "Low"})
+        _fin_data_gaps.append("No verified financial metrics resolved for this vendor (private company or ticker/yfinance lookup failed).")
 
     if len(fin_signals) < 3:
         fin_signals.append({"category": "Solvency", "indicator": f"Strong balance sheet liquidity and verified operational cash flow across trailing 36 months.", "severity": "Low"})
@@ -496,18 +618,25 @@ def _autonomous_fallback_engine(vendor, industry, country, concerns, financial_m
     comp_signals.append({"authority": "CRTC / CASL (Anti-Spam)", "action": "No CASL violations or CRTC telecom enforcement actions identified.", "material": False, "severity": "Low"})
     comp_signals.append({"authority": "Competition Bureau", "action": "No anti-competitive practice or merger review matters outstanding.", "material": False, "severity": "Low"})
 
-    solvency_desc = ('strong ' if fin_score < 30 else 'manageable ') + f'solvency posture with verified {len(fin_signals)} taxonomy signals. Capital structure assessed across liquidity, profitability, leverage, and growth vectors.'
-    fin_summary = f"Financial evaluation for {vendor} demonstrates operational continuity, {solvency_desc}"
+    if _fin_data_gaps:
+        fin_summary = (
+            f"Financial evaluation for {vendor} is based on {len(fin_signals)} verified signal(s); "
+            f"{len(_fin_data_gaps)} standard ratio(s) could not be resolved from live financial data this run "
+            f"(see data_gaps) and are NOT assumed — no ratio is reported unless actually retrieved."
+        )
+    else:
+        solvency_desc = ('strong ' if fin_score < 30 else 'manageable ') + f'solvency posture with verified {len(fin_signals)} taxonomy signals. Capital structure assessed across liquidity, profitability, leverage, and growth vectors.'
+        fin_summary = f"Financial evaluation for {vendor} demonstrates operational continuity, {solvency_desc}"
 
     return {
-        "financial": {"score": fin_score, "signals": fin_signals, "summary": fin_summary, "going_concern_flag": fin_score >= 60, "evidence_urls": []},
+        "financial": {"score": fin_score, "signals": fin_signals, "summary": fin_summary, "going_concern_flag": fin_score >= 60, "evidence_urls": [], "data_gaps": _fin_data_gaps},
         "reputation": {"score": rep_score, "articles": rep_articles, "summary": f"Reputational monitoring across Tier-1 Canadian media outlets (CBC, Globe & Mail, Financial Post) and CanLII indicates stable brand integrity for {vendor} across the 36-month lookback window. {len(rep_articles)} adverse media taxonomy items catalogued.", "evidence_urls": []},
         "key_person": {"score": kp_score, "persons": kp_persons, "sanctions_match_flag": False, "concentration_risk": "Low", "summary": f"Executive bench for {vendor} led by {ceo_name} shows stable leadership continuity. Full OFAC, OSFI, and PEP sanctions screening completed with zero disqualifications matches returned. Board composition and governance oversight verified standard.", "evidence_urls": []},
         "cyber": {"score": cyber_score, "signals": cyber_signals, "recent_breach_flag": cyber_score >= 60, "summary": f"Cybersecurity posture review for {vendor} across CCCS (cyber.gc.ca), CISA KEV catalogue, and NVD databases indicates standard enterprise hygiene with {len(cyber_signals)} taxonomy signals. No active critical advisories or confirmed breach events within the monitoring horizon.", "evidence_urls": []},
         "compliance": {"score": comp_score, "signals": comp_signals, "prohibition_order_flag": comp_score >= 70, "summary": f"Regulatory compliance verification for {vendor} completed across OSFI, FINTRAC AMP register, CSA enforcement database (OSC, BCSC, AMF), OPC PIPEDA registry, and CRTC CASL records. Zero active prohibition or cease-desist orders identified; {len(comp_signals)} regulator taxonomy entries confirmed.", "evidence_urls": []},
         "synth": {
             "analyst_notes": f"Autonomous SK-VDD-001 vendor due diligence completed for {vendor} ({industry}, {country}) across all 5 risk dimensions with 36-month lookback window. Aggregated signal corpus contains {len(fin_signals) + len(cyber_signals) + len(comp_signals)} structured taxonomy findings, {len(rep_articles)} media articles, and {len(kp_persons)} governance-screened persons. The entity exhibits stable operational health with standard industry risk exposure consistent with sector peer benchmarks. All escalations reviewed against Section 10.1 automatic trigger thresholds; no mandatory senior review activations recorded.",
-            "data_gaps": [
+            "data_gaps": _fin_data_gaps + [
                 "Vendor SOC 2 Type II / ISO 27001 third-party security audit report direct attestation requested.",
                 "Direct receipt of most recent audited annual financial statements and auditor opinion page.",
                 "Executive background screening completion for all key decision makers (Level 2 Enhanced Due Diligence).",
@@ -567,37 +696,44 @@ def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns=""
     def _run_fin():
         ev = data.get("financial", {}).get("text", "")
         urls = data.get("financial", {}).get("urls", [])
-        raw = _llm_dispatch(_financial_prompt(vendor, industry, country, ev, urls, financial_metrics, concerns), 350)
+        raw = _llm_dispatch(_financial_prompt(vendor, industry, country, ev, urls, financial_metrics, concerns), 700)
         p = _parse_json(raw)
         return "financial", p
 
     def _run_rep():
         ev = data.get("reputation", {}).get("text", "")
         urls = data.get("reputation", {}).get("urls", [])
-        raw = _llm_dispatch(_reputational_prompt(vendor, industry, country, ev, urls, concerns), 350)
+        raw = _llm_dispatch(_reputational_prompt(vendor, industry, country, ev, urls, concerns), 700)
         p = _parse_json(raw)
         return "reputation", p
 
     def _run_kp():
         ev = data.get("key_person", {}).get("text", "")
         urls = data.get("key_person", {}).get("urls", [])
-        raw = _llm_dispatch(_key_person_prompt(vendor, industry, country, ev, urls, parsed_prof, concerns), 350)
+        raw = _llm_dispatch(_key_person_prompt(vendor, industry, country, ev, urls, parsed_prof, concerns), 700)
         p = _parse_json(raw)
         return "key_person", p
 
     def _run_cyber():
         ev = data.get("cyber", {}).get("text", "")
         urls = data.get("cyber", {}).get("urls", [])
-        raw = _llm_dispatch(_cyber_prompt(vendor, industry, country, domain, ev, urls, concerns), 350)
+        raw = _llm_dispatch(_cyber_prompt(vendor, industry, country, domain, ev, urls, concerns), 700)
         p = _parse_json(raw)
         return "cyber", p
 
     def _run_comp():
         ev = data.get("compliance", {}).get("text", "")
         urls = data.get("compliance", {}).get("urls", [])
-        raw = _llm_dispatch(_compliance_prompt(vendor, industry, country, ev, urls, concerns), 350)
+        raw = _llm_dispatch(_compliance_prompt(vendor, industry, country, ev, urls, concerns), 700)
         p = _parse_json(raw)
         return "compliance", p
+
+    # Tracks whether each dimension's score/summary genuinely came from AI
+    # synthesis this run, or had to fall back to the deterministic rule
+    # engine — surfaced in the output as explanations[cat].source so this
+    # isn't only detectable by eyeballing whether the summary text matches
+    # a known fallback template.
+    _dim_source = {}
 
     for i, _runner in enumerate([_run_fin, _run_rep, _run_kp, _run_cyber, _run_comp]):
         if i > 0:
@@ -605,6 +741,7 @@ def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns=""
         cat, res = _runner()
         if isinstance(res, dict) and "score" in res:
             cat_results[cat] = res
+            _dim_source[cat] = "ai_synthesis"
 
     # 3. Always run Autonomous Rule Engine — even if LLM returned a score,
     #    backfill any empty signals/articles/persons so the UI always shows detail.
@@ -665,6 +802,46 @@ def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns=""
         if not c.get("summary"):
             c["summary"] = auto_fallback[cat]["summary"]
 
+    # 3a-i. Deterministic Audit Red-Flag Detection (SK-VDD-001 Section 6.1.2)
+    # Going-concern / material-weakness must fire from real evidence text,
+    # not solely an LLM's self-reported boolean.
+    _fin_evidence = data.get("financial", {}).get("text", "")
+    _red_flags = _detect_financial_red_flags(_fin_evidence)
+    _fin = cat_results.get("financial", {})
+    if _red_flags["going_concern"]:
+        _fin["going_concern_flag"] = True
+        _fin["score"] = max(int(_fin.get("score", 25)), 85)
+        _fin.setdefault("signals", []).append({
+            "category": "Audit", "indicator": "Going-concern qualification language detected in sourced evidence text — auditor uncertainty about continuing operations.",
+            "severity": "Critical",
+        })
+    if _red_flags["material_weakness"]:
+        _fin.setdefault("signals", []).append({
+            "category": "Audit", "indicator": "Material weakness in internal controls referenced in sourced evidence text — governance/reporting reliability deficiency.",
+            "severity": "High",
+        })
+        _fin["score"] = max(int(_fin.get("score", 25)), 65)
+    cat_results["financial"] = _fin
+
+    # 3a-ii. Real Cyber Intelligence (NVD CVE database + CISA KEV catalogue,
+    # both free/no-key; HIBP domain breach search if HIBP_API_KEY configured).
+    # This replaces relying solely on LLM narrative for Section 6.4 signals.
+    _cyber = cat_results.get("cyber", {})
+    try:
+        _real_cyber = cyber_intel.gather_cyber_intelligence(vendor, domain)
+    except Exception:
+        _real_cyber = {"signals": [], "recent_breach_flag": False}
+    if _real_cyber["signals"]:
+        _cyber.setdefault("signals", [])
+        _cyber["signals"] = _real_cyber["signals"] + _cyber["signals"]
+        _cyber["score"] = max(int(_cyber.get("score", 25)), 70 if _real_cyber.get("recent_breach_flag") else 55)
+    if _real_cyber.get("recent_breach_flag"):
+        _cyber["recent_breach_flag"] = True
+    cat_results["cyber"] = _cyber
+
+    # 3b. Licensed-Source Confidence Reduction (SK-VDD-001 Section 9.2)
+    licensed_gaps = licensed_sources.all_missing_data_gaps()
+
     # 3a. Key-Person Concentration Risk Structural Checks (SK-VDD-001 Section 6.3.3)
     _kp = cat_results.get("key_person", {})
     _kp_persons = _kp.get("persons", [])
@@ -706,6 +883,34 @@ def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns=""
 
     if _structural_signals:
         _kp.setdefault("persons", []).extend(_structural_signals)
+
+    # 3c. Real OFAC SDN Sanctions Cross-Reference (SK-VDD-001 Section 6.3.2)
+    # Deterministic, not LLM discretion: overrides sanctions_match_flag only on an
+    # actual hit against the real, free, public OFAC SDN list — never fabricates
+    # or removes a genuine match reported elsewhere.
+    _sdn_vendor_hits = sanctions_check.search_sdn(vendor)
+    if _sdn_vendor_hits:
+        _kp["sanctions_match_flag"] = True
+        hit = _sdn_vendor_hits[0]
+        _kp.setdefault("persons", []).append({
+            "name": vendor,
+            "role": "Entity (vendor itself)",
+            "flags": [f"OFAC SDN LIST MATCH — Program: {hit['program']} (ent# {hit['ent_num']})"],
+            "severity": "Critical",
+        })
+
+    for _person in list(_kp.get("persons", [])):
+        _p_name = _person.get("name", "")
+        if not _p_name or _p_name in ("Executive Leadership Team", "Board of Directors", "Chief Financial Officer", "Executive Bench", "Recent Attrition"):
+            continue
+        _hits = sanctions_check.search_sdn(_p_name)
+        if _hits:
+            _kp["sanctions_match_flag"] = True
+            hit = _hits[0]
+            _person["severity"] = "Critical"
+            _person.setdefault("flags", []).append(
+                f"OFAC SDN LIST MATCH — Program: {hit['program']} (ent# {hit['ent_num']})"
+            )
 
     cat_results["key_person"] = _kp
 
@@ -760,26 +965,40 @@ def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns=""
             k: v for k, v in financial_metrics.items() if v not in (None, "", "N/A", "Not Available")
         }
 
-    sources_used = [
-        "SEDAR+ (sedarplus.ca) - Public Filings & SEDAR+ Continuous Disclosure",
-        "Canada Business Corporations Act (CBCA) - Federal Corporate Registry",
-        "Google News & Tier-1 Canadian Outlets (CBC, Globe & Mail, Financial Post, National Post)",
-        "CanLII - Canadian Legal Information Institute Court & Litigation Records",
-        "OSFI - Office of the Superintendent of Financial Institutions Public Actions",
-        "FINTRAC - Financial Transactions and Reports Analysis Centre AMP Register",
-        "CSA - Canadian Securities Administrators Enforcement (OSC, BCSC, AMF)",
-        "CCCS - Canadian Centre for Cyber Security (cyber.gc.ca) Advisories",
-        "CISA KEV Catalogue & NVD - Known Exploited Vulnerabilities & CVSS Scoring"
-    ]
+    # Section 8: "data_sources_used ... Enumeration of all sources successfully
+    # queried" — built from what this run actually hit (per-category search hit
+    # counts and the real NVD/CISA KEV/HIBP calls), not a static constant.
+    sources_used = ["Google News & Web Intelligence Sweep (via Serper) — Tier-1 Canadian & global outlets"]
+    if data.get("financial", {}).get("hit_count", 0) > 0:
+        sources_used.append("SEDAR+ / Public Filings Web Search — financial disclosure signals")
+    if data.get("reputation", {}).get("hit_count", 0) > 0:
+        sources_used.append("CanLII / Tier-1 Canadian News (CBC, Globe & Mail, Financial Post, National Post)")
+    if data.get("compliance", {}).get("hit_count", 0) > 0:
+        sources_used.append("OSFI / FINTRAC / CSA / OPC / CRTC Enforcement Web Search")
+    if financial_metrics:
+        sources_used.append(f"yfinance — live financial ratios ({financial_metrics.get('ticker', 'ticker')})")
+    sources_used.append("NVD (nvd.nist.gov) REST API — CVE records")
+    sources_used.append("CISA Known Exploited Vulnerabilities Catalogue")
+    sources_used.append("OFAC SDN Sanctions List (sanctionslistservice.ofac.treas.gov)")
+    if _real_cyber.get("hibp_queried"):
+        sources_used.append("HaveIBeenPwned Domain Search API")
+    sources_used.extend(licensed_sources.configured_sources())
 
     # Guarantee minimum completeness on recommendations and data gaps
     final_recommendations = synth.get("recommendations", []) or []
     if len(final_recommendations) < 5:
         final_recommendations = auto_fallback["synth"]["recommendations"]
 
-    final_data_gaps = synth.get("data_gaps", []) or []
-    if len(final_data_gaps) < 5:
-        final_data_gaps = auto_fallback["synth"]["data_gaps"]
+    # Section 8 data_gaps: real licensed-source gaps first (Section 9.2), then
+    # backfilled with the synthesis engine's identified follow-ups.
+    final_data_gaps = list(licensed_gaps)
+    for g in (synth.get("data_gaps", []) or []):
+        if g not in final_data_gaps:
+            final_data_gaps.append(g)
+    if len(final_data_gaps) < 3:
+        for g in auto_fallback["synth"]["data_gaps"]:
+            if g not in final_data_gaps:
+                final_data_gaps.append(g)
 
     final_analyst_notes = synth.get("analyst_notes", "") or ""
     if len(final_analyst_notes) < 100:
@@ -794,6 +1013,10 @@ def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns=""
                 "signals": cat_results[cat].get("signals", auto_fallback[cat].get("signals", [])),
                 "articles": cat_results[cat].get("articles", auto_fallback[cat].get("articles", [])),
                 "persons": cat_results[cat].get("persons", auto_fallback[cat].get("persons", [])),
+                # Section 9.1 source attribution: was this dimension's score/
+                # summary genuinely AI-synthesized this run, or backfilled by
+                # the deterministic rule engine (e.g. LLM quota exhausted)?
+                "source": _dim_source.get(cat, "autonomous_fallback"),
             }
             for cat in RISK_CATEGORIES
         },

@@ -12,6 +12,7 @@ Serves endpoints for:
 import os
 import io
 import json
+import time
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -22,6 +23,18 @@ from typing import Optional, Dict, Any
 from services import get_vendor_analysis
 from normalizer import normalize_vendor_name
 from pdf_generator import generate_pdf
+import config
+
+
+def _safe_print(msg: str):
+    """Windows cp1252-safe logging (matches the pattern used across the codebase)."""
+    try:
+        print(msg)
+    except Exception:
+        try:
+            print(msg.encode("ascii", errors="replace").decode("ascii"))
+        except Exception:
+            pass
 
 app = FastAPI(
     title="DRiskify NIVETA Platform API",
@@ -126,6 +139,9 @@ class AnalyzeRequest(BaseModel):
     company_url: Optional[str] = ""
     business_number: Optional[str] = ""
     ticker: Optional[str] = ""
+    # Section 4.3 Optional Context Parameters
+    duns_number: Optional[str] = ""
+    naics_code: Optional[str] = ""
 
 
 class PdfRequest(BaseModel):
@@ -165,10 +181,18 @@ def analyze_vendor(req: AnalyzeRequest):
     norm = normalize_vendor_name(req.vendor)
     clean_name = norm["normalized_name"]
 
-    cache_key = f"{clean_name}__{req.country}__{req.industry}__{req.ticker}__{req.company_url}"
-    if cache_key in ANALYSIS_CACHE:
-        print(f"⚡ Returning cached analysis for: {clean_name}")
-        return ANALYSIS_CACHE[cache_key]
+    cache_key = f"{clean_name}__{req.country}__{req.industry}__{req.ticker}__{req.company_url}__{req.duns_number}__{req.naics_code}"
+    cached = ANALYSIS_CACHE.get(cache_key)
+    if cached:
+        age = time.time() - cached["cached_at"]
+        if age < config.CACHE_TTL_SECONDS:
+            _safe_print(f"[cache] Returning cached analysis for: {clean_name} (age {int(age)}s)")
+            return cached["result"]
+        # Section 2.1: periodic / event-triggered reviews require the cache
+        # to actually expire, otherwise a new adverse event would never be
+        # reflected. Evict and fall through to a fresh run.
+        _safe_print(f"[cache] Expired for: {clean_name} (age {int(age)}s >= TTL {config.CACHE_TTL_SECONDS}s) - re-running")
+        del ANALYSIS_CACHE[cache_key]
 
     result, raw_signals = get_vendor_analysis(
         vendor=clean_name,
@@ -177,13 +201,15 @@ def analyze_vendor(req: AnalyzeRequest):
         concerns=req.concerns or "",
         company_url=req.company_url or "",
         business_number=req.business_number or "",
-        ticker=req.ticker or ""
+        ticker=req.ticker or "",
+        duns_number=req.duns_number or "",
+        naics_code=req.naics_code or "",
     )
 
     if "error" in result and not result.get("risk_scores"):
         raise HTTPException(status_code=500, detail=result["error"])
 
-    ANALYSIS_CACHE[cache_key] = result
+    ANALYSIS_CACHE[cache_key] = {"result": result, "cached_at": time.time()}
     return result
 
 
