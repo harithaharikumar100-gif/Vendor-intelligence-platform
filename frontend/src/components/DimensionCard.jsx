@@ -19,7 +19,19 @@ const severityText = (sev) => {
   }
 };
 
-export default function DimensionCard({ title, weight, score, sources, summary, signals, articles, persons, links, colorHex }) {
+const principleDot = (status) => {
+  if (status === 'evidence_found') return 'bg-tier-low';
+  if (status === 'evidence_of_concern') return 'bg-tier-high';
+  return 'bg-ink-700';
+};
+
+const principleLabel = (status) => {
+  if (status === 'evidence_found') return 'Evidence found';
+  if (status === 'evidence_of_concern') return 'Evidence of concern';
+  return 'Not disclosed in available sources';
+};
+
+export default function DimensionCard({ title, weight, score, sources, summary, signals, articles, persons, links, colorHex, frameworkAlignment }) {
   const [expanded, setExpanded] = useState(false);
 
   const getTierLabel = (s) => {
@@ -32,7 +44,7 @@ export default function DimensionCard({ title, weight, score, sources, summary, 
   const tier = getTierLabel(score);
 
   return (
-    <div className="border border-border rounded-xl overflow-hidden mb-3 relative">
+    <div className="border border-border hover:border-border-light bg-surface rounded-2xl overflow-hidden mb-3 relative transition-colors duration-200">
       <span className={`absolute left-0 top-0 bottom-0 w-0.5 ${tier.color.replace('text-', 'bg-')}`} />
       {/* Card Header */}
       <div className="p-5 flex items-center justify-between gap-4">
@@ -140,6 +152,27 @@ export default function DimensionCard({ title, weight, score, sources, summary, 
             </ol>
           </div>
         )}
+        {frameworkAlignment && frameworkAlignment.length > 0 && frameworkAlignment.map((fw, fwIdx) => (
+          <div key={fwIdx}>
+            <p className="text-ink-500 text-[11px] uppercase tracking-wider mb-2">
+              Framework alignment — {fw.framework}
+            </p>
+            <ol className="space-y-0">
+              {fw.principles.map((p, idx) => (
+                <li key={idx} className="flex items-start gap-3 py-2 border-t border-border first:border-t-0">
+                  <span className="font-mono text-ink-500 shrink-0 w-5">{idx + 1}.</span>
+                  <span className={`w-1.5 h-1.5 rounded-full mt-1.5 shrink-0 ${principleDot(p.status)}`} />
+                  <span className="text-ink-200 flex-1">{p.title}</span>
+                  <span className={`text-[11px] font-medium uppercase tracking-wide shrink-0 ${
+                    p.status === 'evidence_of_concern' ? 'text-tier-high' : p.status === 'evidence_found' ? 'text-tier-low' : 'text-ink-500'
+                  }`}>
+                    {principleLabel(p.status)}
+                  </span>
+                </li>
+              ))}
+            </ol>
+          </div>
+        ))}
       </div>
 
       {/* Expandable extra detail (evidence source links only) */}

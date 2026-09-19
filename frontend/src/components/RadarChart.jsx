@@ -22,7 +22,7 @@ export default function RadarChart({ scores }) {
     <div className="w-full h-72">
       <ResponsiveContainer width="100%" height="100%">
         <RechartsRadar cx="50%" cy="50%" outerRadius="75%" data={data}>
-          <PolarGrid stroke="#1f1f1f" />
+          <PolarGrid stroke="rgba(255,255,255,0.08)" />
           <PolarAngleAxis
             dataKey="subject"
             tick={{ fill: '#8a8a8a', fontSize: 11, fontFamily: 'Inter' }}
@@ -31,15 +31,15 @@ export default function RadarChart({ scores }) {
             angle={30}
             domain={[0, 100]}
             tick={{ fill: '#6b6b6b', fontSize: 9 }}
-            stroke="#1f1f1f"
+            stroke="rgba(255,255,255,0.08)"
           />
           <Radar
             name="Vendor Risk"
             dataKey="value"
-            stroke="#fafafa"
-            fill="#fafafa"
-            fillOpacity={0.08}
-            dot={{ r: 3, fill: '#fafafa' }}
+            stroke="#4f6bff"
+            fill="#4f6bff"
+            fillOpacity={0.14}
+            dot={{ r: 3, fill: '#4f6bff' }}
           />
           <Tooltip
             content={({ active, payload }) => {

@@ -407,8 +407,49 @@ def generate_pdf(result: dict, filename: str = "vendor_report.pdf", vendor_name:
         block.append(Spacer(1, 8))
         elements.append(KeepTogether(block))
 
-    # ── 4. DATA SOURCES, GAPS & LICENSED-SOURCE DISCLOSURE ──
-    elements.append(Paragraph("4. Data Sources, Gaps &amp; Confidence Disclosure", h2_style))
+    # ── 4. NAMED REGULATORY FRAMEWORK ALIGNMENT ──
+    # Per the platform's "provided framework" model, the Key-Person/Governance
+    # and Compliance dimensions are additionally checked against a specific,
+    # named set of supplied regulatory frameworks (OSFI Corporate Governance
+    # Guideline, OSFI Guideline E-13) rather than open-ended regulatory
+    # reasoning. Absence of evidence is reported honestly, never assumed.
+    framework_alignment = result.get("framework_alignment", {})
+    _fw_entries = (framework_alignment.get("key_person", []) or []) + (framework_alignment.get("compliance", []) or [])
+    if _fw_entries:
+        elements.append(Paragraph("4. Regulatory Framework Alignment", h2_style))
+        elements.append(Paragraph(
+            "Assessed against the following named frameworks supplied for this engagement — evidence-based, "
+            "not a pass/fail certification. Absence of evidence is reported honestly rather than assumed.",
+            muted_style
+        ))
+        for fw in _fw_entries:
+            block = []
+            block.append(Paragraph(
+                f"{_esc(fw.get('framework', ''))} "
+                f"<font color='{_hexstr(INK_500)}' size=8>({_esc(fw.get('authority', ''))})</font>",
+                h3_style
+            ))
+            for i, p in enumerate(fw.get("principles", []), 1):
+                status = p.get("status", "not_disclosed_in_available_sources")
+                if status == "evidence_found":
+                    status_color = _hexstr(TIER_COLORS["Low"])
+                    status_label = "EVIDENCE FOUND"
+                elif status == "evidence_of_concern":
+                    status_color = _hexstr(TIER_COLORS["High"])
+                    status_label = "EVIDENCE OF CONCERN"
+                else:
+                    status_color = _hexstr(INK_500)
+                    status_label = "NOT DISCLOSED IN AVAILABLE SOURCES"
+                block.append(Paragraph(
+                    f"{i}.&nbsp; {_esc(p.get('title', ''))} "
+                    f"<font color='{status_color}'><b>{status_label}</b></font>",
+                    body_style
+                ))
+            block.append(Spacer(1, 6))
+            elements.append(KeepTogether(block))
+
+    # ── 5. DATA SOURCES, GAPS & LICENSED-SOURCE DISCLOSURE ──
+    elements.append(Paragraph("5. Data Sources, Gaps &amp; Confidence Disclosure", h2_style))
 
     sources = result.get("data_sources_used", [])
     if sources:
@@ -425,12 +466,12 @@ def generate_pdf(result: dict, filename: str = "vendor_report.pdf", vendor_name:
     # ── 5. MITIGATIONS ──
     recs = result.get("recommendations", [])
     if recs:
-        elements.append(Paragraph("5. Recommended Risk Mitigations &amp; Actions", h2_style))
+        elements.append(Paragraph("6. Recommended Risk Mitigations &amp; Actions", h2_style))
         for i, r in enumerate(recs, 1):
             elements.append(Paragraph(f"{i}.&nbsp; {_esc(r)}", body_style))
 
-    # ── 6. SIGN-OFF ──
-    elements.append(Paragraph("6. Human-in-the-Loop Review &amp; Governance Sign-Off", h2_style))
+    # ── 7. SIGN-OFF ──
+    elements.append(Paragraph("7. Human-in-the-Loop Review &amp; Governance Sign-Off", h2_style))
     elements.append(Paragraph(
         "This report is advisory. Per SK-VDD-001 Section 9.3, NIVETA does not autonomously approve or "
         "reject a vendor — final onboarding decisions must be made by a qualified human risk analyst.",

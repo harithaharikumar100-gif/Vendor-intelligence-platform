@@ -331,15 +331,31 @@ def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada"
         # Source Health Tracking (SK-VDD-001 Section 5 & 10.2)
         federal_found = registry_data.get("registries", {}).get("federal_registry", {}).get("found", False)
         provincial_found = registry_data.get("registries", {}).get("provincial_registry", {}).get("found", False)
+
+        # Section 10.2: a quota-exhausted or misconfigured Serper key must not
+        # look identical in the report to "searched and genuinely found
+        # nothing" — surface it explicitly so it's visible instead of silently
+        # falling back to LLM-narrative-only risk factors.
+        search_grounding = data.get("search_grounding", {"available": True, "reason": ""})
+        result["search_grounding"] = search_grounding
         result["source_health"] = {
             "corporations_canada": federal_found,
             "provincial_registry": provincial_found,
             "canlii_litigation": registry_data.get("litigation", {}).get("total", 0) > 0,
             "sedarplus_filings": registry_data.get("filings", {}).get("total", 0) > 0,
-            "serper_search": bool(data.get("meta")),
+            "serper_search": bool(search_grounding.get("available")) and any(
+                data.get(c, {}).get("hit_count", 0) > 0 for c in RISK_CATEGORIES
+            ),
             "yfinance": bool(financial_metrics),
             "corporate_profile": bool(prof_extras),
         }
+        if not search_grounding.get("available"):
+            result.setdefault("data_gaps", [])
+            result["data_gaps"].insert(0,
+                f"LIVE WEB SEARCH GROUNDING UNAVAILABLE this run ({search_grounding.get('reason', 'unknown reason')}) — "
+                f"risk factors below are LLM-knowledge and deterministic-rule-engine best-effort only, "
+                f"NOT verified against live public search results (Section 10.2)."
+            )
 
         # SK-VDD-001 Section 3.3 step 2 (Jurisdiction Confirmation) + Section 10.2
         # (Intelligence Run Failure Handling), unified into one jurisdiction gate.

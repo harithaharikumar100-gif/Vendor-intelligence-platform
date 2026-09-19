@@ -30,6 +30,13 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('overview');
   const [presets, setPresets] = useState([]);
   const [normalizedPreview, setNormalizedPreview] = useState('');
+  const [scrolled, setScrolled] = useState(false);
+
+  useEffect(() => {
+    const onScroll = () => setScrolled(window.scrollY > 8);
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
 
   // React 18 StrictMode intentionally double-invokes mount effects in dev
   // to surface side-effect bugs — without this guard, that means every page
@@ -200,10 +207,16 @@ export default function App() {
   return (
     <div className="min-h-screen bg-background text-ink-50 flex flex-col font-sans selection:bg-white selection:text-black">
       {/* Top Navigation */}
-      <header className="border-b border-border sticky top-0 z-50 bg-background/95 backdrop-blur-sm">
+      <header
+        className={`sticky top-0 z-50 transition-all duration-300 ${
+          scrolled
+            ? 'bg-background/80 backdrop-blur-md border-b border-border'
+            : 'bg-transparent border-b border-transparent'
+        }`}
+      >
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 h-14 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <Shield className="w-4 h-4 text-ink-50" strokeWidth={1.75} />
+            <Shield className="w-4 h-4 text-accent" strokeWidth={1.75} />
             <span className="text-sm font-medium tracking-tight text-ink-50">DRiskify</span>
             <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-border text-ink-500 font-mono">
               SK-VDD-001
@@ -230,13 +243,17 @@ export default function App() {
       {/* Main Content Area */}
       <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-10 space-y-10">
         {/* Search & Hero */}
-        <section className="space-y-5">
-          <div>
-            <h1 className="text-2xl font-medium text-ink-50 tracking-tight">
-              Vendor intelligence scraping & risk scoring
+        <section className="space-y-5 animate-fade-up">
+          <div className="space-y-2.5">
+            <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-ink-500">
+              <span className="w-1.5 h-1.5 rounded-full bg-accent" />
+              Autonomous due diligence engine
+            </div>
+            <h1 className="text-3xl sm:text-[2.25rem] font-semibold text-ink-50 tracking-tight leading-tight">
+              Vendor intelligence scraping &amp; <span className="text-accent">risk scoring</span>
             </h1>
-            <p className="text-sm text-ink-500 mt-1.5">
-              Autonomous 5-dimension intelligence sweep across Canadian & international public records.
+            <p className="text-sm text-ink-500 max-w-xl">
+              Autonomous 5-dimension intelligence sweep across Canadian &amp; international public records.
             </p>
           </div>
 
@@ -249,14 +266,14 @@ export default function App() {
                 onChange={(e) => setVendorInput(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleRunAnalysis()}
                 placeholder="Enter vendor legal name (e.g. Shopify Inc., BlackBerry Ltd., CGI Inc.)..."
-                className="w-full pl-10 pr-4 py-2.5 bg-surface border border-border rounded-lg text-ink-50 text-sm focus:outline-none focus:border-border-light transition-colors placeholder:text-ink-500"
+                className="w-full pl-10 pr-4 py-2.5 bg-surface border border-border rounded-lg text-ink-50 text-sm focus:outline-none focus:border-accent transition-colors placeholder:text-ink-500"
               />
             </div>
 
             <button
               onClick={() => handleRunAnalysis()}
               disabled={loading}
-              className="px-5 py-2.5 rounded-lg bg-white hover:bg-ink-200 text-black font-medium text-sm transition-colors disabled:opacity-40 flex items-center justify-center gap-2 shrink-0"
+              className="px-5 py-2.5 rounded-lg bg-accent hover:bg-accent-hover text-white font-medium text-sm transition-all disabled:opacity-40 flex items-center justify-center gap-2 shrink-0 shadow-accent"
             >
               {loading ? <RefreshCw size={14} className="animate-spin" /> : <Sparkles size={14} />}
               Execute due diligence
@@ -273,15 +290,22 @@ export default function App() {
           <div className="pt-1">
             <span className="text-[11px] text-ink-500 uppercase tracking-wider mr-2">Quick select</span>
             <div className="inline-flex flex-wrap gap-1.5 mt-1.5">
-              {presets.map((p, idx) => (
-                <button
-                  key={idx}
-                  onClick={() => selectPreset(p)}
-                  className="px-2.5 py-1 rounded-md border border-border hover:border-border-light text-ink-400 hover:text-ink-50 text-xs transition-colors"
-                >
-                  {p.name}
-                </button>
-              ))}
+              {presets.map((p, idx) => {
+                const isActive = result?.vendor_name === p.clean_name;
+                return (
+                  <button
+                    key={idx}
+                    onClick={() => selectPreset(p)}
+                    className={`px-2.5 py-1 rounded-md border text-xs transition-colors ${
+                      isActive
+                        ? 'border-accent-border bg-accent-muted text-accent-text'
+                        : 'border-border hover:border-border-light text-ink-400 hover:text-ink-50'
+                    }`}
+                  >
+                    {p.name}
+                  </button>
+                );
+              })}
             </div>
           </div>
 
@@ -302,7 +326,7 @@ export default function App() {
                     type="text"
                     value={industry}
                     onChange={(e) => setIndustry(e.target.value)}
-                    className="w-full px-3 py-2 bg-surface-card border border-border rounded-md text-ink-200 focus:outline-none focus:border-border-light"
+                    className="w-full px-3 py-2 bg-surface-card border border-border rounded-md text-ink-200 focus:outline-none focus:border-accent transition-colors"
                   />
                 </div>
                 <div>
@@ -312,7 +336,7 @@ export default function App() {
                     value={businessNumber}
                     onChange={(e) => setBusinessNumber(e.target.value)}
                     placeholder="e.g. 123456789"
-                    className="w-full px-3 py-2 bg-surface-card border border-border rounded-md text-ink-200 focus:outline-none focus:border-border-light placeholder:text-ink-700"
+                    className="w-full px-3 py-2 bg-surface-card border border-border rounded-md text-ink-200 focus:outline-none focus:border-accent transition-colors placeholder:text-ink-700"
                   />
                 </div>
                 <div>
@@ -322,7 +346,7 @@ export default function App() {
                     value={ticker}
                     onChange={(e) => setTicker(e.target.value)}
                     placeholder="e.g. SHOP, BB"
-                    className="w-full px-3 py-2 bg-surface-card border border-border rounded-md text-ink-200 focus:outline-none focus:border-border-light placeholder:text-ink-700"
+                    className="w-full px-3 py-2 bg-surface-card border border-border rounded-md text-ink-200 focus:outline-none focus:border-accent transition-colors placeholder:text-ink-700"
                   />
                 </div>
                 <div>
@@ -332,7 +356,7 @@ export default function App() {
                     value={dunsNumber}
                     onChange={(e) => setDunsNumber(e.target.value)}
                     placeholder="e.g. 204958581"
-                    className="w-full px-3 py-2 bg-surface-card border border-border rounded-md text-ink-200 focus:outline-none focus:border-border-light placeholder:text-ink-700"
+                    className="w-full px-3 py-2 bg-surface-card border border-border rounded-md text-ink-200 focus:outline-none focus:border-accent transition-colors placeholder:text-ink-700"
                   />
                 </div>
                 <div>
@@ -342,7 +366,7 @@ export default function App() {
                     value={naicsCode}
                     onChange={(e) => setNaicsCode(e.target.value)}
                     placeholder="e.g. 511210"
-                    className="w-full px-3 py-2 bg-surface-card border border-border rounded-md text-ink-200 focus:outline-none focus:border-border-light placeholder:text-ink-700"
+                    className="w-full px-3 py-2 bg-surface-card border border-border rounded-md text-ink-200 focus:outline-none focus:border-accent transition-colors placeholder:text-ink-700"
                   />
                 </div>
               </div>
@@ -352,8 +376,8 @@ export default function App() {
 
         {/* Loading State */}
         {loading && (
-          <div className="border border-border rounded-xl p-8 text-center space-y-3">
-            <RefreshCw size={20} className="animate-spin mx-auto text-ink-400" />
+          <div className="panel p-8 text-center space-y-3 animate-fade-up">
+            <RefreshCw size={20} className="animate-spin mx-auto text-accent" />
             <div>
               <h3 className="text-sm font-medium text-ink-50">
                 Gathering autonomous intelligence on {vendorInput}...
@@ -370,7 +394,7 @@ export default function App() {
 
         {/* Error */}
         {error && (
-          <div className="p-4 rounded-lg border border-tier-critical/25 bg-tier-critical/[0.04] text-tier-critical text-sm flex items-center gap-3">
+          <div className="p-4 rounded-xl border border-tier-critical/25 bg-tier-critical/[0.04] text-tier-critical text-sm flex items-center gap-3 animate-fade-up">
             <AlertTriangle size={16} className="shrink-0" />
             <div><strong>Error —</strong> {error}</div>
           </div>
@@ -378,14 +402,15 @@ export default function App() {
 
         {/* Results */}
         {result && !loading && (
-          <div className="space-y-8">
+          <div className="space-y-8 animate-fade-up">
             <EscalationBanner escalations={result.automatic_escalations} />
 
             {/* Executive Hero */}
-            <div className="border border-border rounded-xl p-6 flex flex-col md:flex-row items-center justify-between gap-6">
+            <div className="panel p-6 flex flex-col md:flex-row items-center justify-between gap-6 relative overflow-hidden shadow-panel">
+              <span className={`absolute top-0 left-0 right-0 h-[2px] ${getTierColor(result.overall_risk_rating).replace('text-', 'bg-')}`} />
               <div className="space-y-2 flex-1">
                 <div className="flex flex-wrap items-center gap-2.5">
-                  <h2 className="text-xl font-medium text-ink-50 tracking-tight">
+                  <h2 className="text-xl font-semibold text-ink-50 tracking-tight">
                     {result.vendor_name || vendorInput}
                   </h2>
                   <span className={`text-xs font-medium uppercase tracking-wider ${getTierColor(result.overall_risk_rating)}`}>
@@ -411,7 +436,7 @@ export default function App() {
             </div>
 
             {/* Entity Intelligence Quick Bar */}
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-px bg-border rounded-xl overflow-hidden border border-border">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-px bg-border rounded-2xl overflow-hidden border border-border">
               {[
                 { icon: Key, label: 'Executive leadership', value: result.company_profile?.ceo, iconColor: 'text-violet-400' },
                 { icon: Building2, label: 'Corporate founder', value: result.company_profile?.founder, iconColor: 'text-sky-400' },
@@ -420,7 +445,7 @@ export default function App() {
                 { icon: Users, label: 'Est. employees', value: result.company_profile?.employees, iconColor: 'text-ink-400' },
                 { icon: TrendingUp, label: 'Annual revenue', value: result.company_profile?.financial_metrics?.revenue, mono: true, iconColor: 'text-tier-low', valueColor: 'text-tier-low' },
               ].map((cell, i) => (
-                <div key={i} className="bg-surface p-3.5 flex flex-col justify-between gap-1.5">
+                <div key={i} className="bg-surface hover:bg-surface-hover transition-colors p-3.5 flex flex-col justify-between gap-1.5">
                   <span className="text-[10px] uppercase text-ink-500 tracking-wider flex items-center gap-1.5">
                     <cell.icon size={11} strokeWidth={1.75} className={cell.iconColor} /> {cell.label}
                   </span>
@@ -432,7 +457,7 @@ export default function App() {
             </div>
 
             {/* 5-Dimension Mini Bar */}
-            <div className="grid grid-cols-2 md:grid-cols-5 gap-px bg-border rounded-xl overflow-hidden border border-border">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-px bg-border rounded-2xl overflow-hidden border border-border">
               {[
                 { key: 'financial', label: 'Financial viability', wt: '30%' },
                 { key: 'reputation', label: 'Reputational risk', wt: '20%' },
@@ -442,7 +467,7 @@ export default function App() {
               ].map((dim) => {
                 const s = result.risk_scores?.[dim.key] ?? 20;
                 return (
-                  <div key={dim.key} className="bg-surface p-4 relative">
+                  <div key={dim.key} className="bg-surface hover:bg-surface-hover transition-colors p-4 relative">
                     <span className={`absolute left-0 top-0 bottom-0 w-0.5 ${scoreTierColor(s).replace('text-', 'bg-')}`} />
                     <div className="flex items-center justify-between text-[11px] text-ink-500 uppercase tracking-wider mb-2">
                       <span>{dim.label}</span>
@@ -473,7 +498,7 @@ export default function App() {
                     onClick={() => setActiveTab(t.id)}
                     className={`px-4 py-2.5 text-xs font-medium border-b-2 transition-colors whitespace-nowrap ${
                       active
-                        ? 'border-white text-ink-50'
+                        ? 'border-accent text-ink-50'
                         : 'border-transparent text-ink-500 hover:text-ink-200'
                     }`}
                   >
@@ -485,8 +510,8 @@ export default function App() {
 
             {/* TAB 1: Executive Overview */}
             {activeTab === 'overview' && (
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-                <div className="lg:col-span-6 border border-border rounded-xl p-6">
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 animate-fade-in">
+                <div className="lg:col-span-6 panel p-6">
                   <h3 className="text-xs font-medium text-ink-500 uppercase tracking-wider mb-4">
                     5-dimension risk radar
                   </h3>
@@ -494,7 +519,7 @@ export default function App() {
                 </div>
 
                 <div className="lg:col-span-6 space-y-4">
-                  <div className="border border-border rounded-xl p-6 space-y-3">
+                  <div className="panel p-6 space-y-3">
                     <h3 className="text-xs font-medium text-ink-500 uppercase tracking-wider">
                       Holistic analyst assessment · Section 8
                     </h3>
@@ -503,7 +528,7 @@ export default function App() {
                     </p>
                   </div>
 
-                  <div className="border border-border rounded-xl p-6 space-y-3">
+                  <div className="panel p-6 space-y-3">
                     <h3 className="text-xs font-medium text-ink-500 uppercase tracking-wider">
                       Authoritative sources ingested · Section 5
                     </h3>
@@ -521,7 +546,7 @@ export default function App() {
 
             {/* TAB 2: 5 Risk Dimensions */}
             {activeTab === 'dimensions' && (
-              <div className="space-y-3">
+              <div className="space-y-3 animate-fade-in">
                 <DimensionCard
                   title="Financial viability risk"
                   weight="30% weight"
@@ -550,6 +575,7 @@ export default function App() {
                   summary={result.explanations?.key_person?.summary}
                   persons={result.explanations?.key_person?.persons}
                   links={result.evidence_links?.key_person}
+                  frameworkAlignment={result.framework_alignment?.key_person}
                 />
 
                 <DimensionCard
@@ -570,14 +596,15 @@ export default function App() {
                   summary={result.explanations?.compliance?.summary}
                   signals={result.explanations?.compliance?.signals}
                   links={result.evidence_links?.compliance}
+                  frameworkAlignment={result.framework_alignment?.compliance}
                 />
               </div>
             )}
 
             {/* TAB 3: Corporate Registry & Filings */}
             {activeTab === 'corporate' && (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="border border-border rounded-xl p-6 space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-fade-in">
+                <div className="panel p-6 space-y-4">
                   <h3 className="text-xs font-medium text-ink-500 uppercase tracking-wider">
                     Corporate entity verification
                   </h3>
@@ -600,7 +627,7 @@ export default function App() {
                   </div>
                 </div>
 
-                <div className="border border-border rounded-xl p-6 space-y-4">
+                <div className="panel p-6 space-y-4">
                   <h3 className="text-xs font-medium text-ink-500 uppercase tracking-wider">
                     Verified financial ratios · SEDAR+ / public disclosures
                   </h3>
@@ -624,8 +651,8 @@ export default function App() {
 
             {/* TAB 4: Mitigations & Data Gaps */}
             {activeTab === 'mitigation' && (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="border border-border rounded-xl p-6 space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-fade-in">
+                <div className="panel p-6 space-y-4">
                   <h3 className="text-xs font-medium text-ink-500 uppercase tracking-wider">
                     Recommended risk mitigations
                   </h3>
@@ -639,7 +666,7 @@ export default function App() {
                   </ol>
                 </div>
 
-                <div className="border border-border rounded-xl p-6 space-y-4">
+                <div className="panel p-6 space-y-4">
                   <h3 className="text-xs font-medium text-ink-500 uppercase tracking-wider flex items-center gap-2">
                     Data gaps & verification items · Section 9.2
                   </h3>
@@ -657,10 +684,10 @@ export default function App() {
 
             {/* TAB 5: Official Export Center */}
             {activeTab === 'export' && (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="border border-border rounded-xl p-6 space-y-4 flex flex-col justify-between">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-fade-in">
+                <div className="panel p-6 space-y-4 flex flex-col justify-between">
                   <div className="space-y-2">
-                    <FileText size={18} className="text-ink-400" strokeWidth={1.75} />
+                    <FileText size={18} className="text-accent" strokeWidth={1.75} />
                     <h3 className="text-sm font-medium text-ink-50">SK-VDD-001 PDF summary report</h3>
                     <p className="text-xs text-ink-500 leading-relaxed">
                       Two-pass PDF containing document control, executive scorecard, signal attributions, gaps, and human-in-the-loop sign-off.
@@ -668,14 +695,14 @@ export default function App() {
                   </div>
                   <button
                     onClick={handleDownloadPdf}
-                    className="w-full py-2.5 rounded-lg bg-white hover:bg-ink-200 text-black text-xs font-medium flex items-center justify-center gap-2 transition-colors"
+                    className="w-full py-2.5 rounded-lg bg-accent hover:bg-accent-hover text-white text-xs font-medium flex items-center justify-center gap-2 transition-all shadow-accent"
                   >
                     <Download size={14} />
                     Download official PDF report
                   </button>
                 </div>
 
-                <div className="border border-border rounded-xl p-6 space-y-4 flex flex-col justify-between">
+                <div className="panel p-6 space-y-4 flex flex-col justify-between">
                   <div className="space-y-2">
                     <Layers size={18} className="text-ink-400" strokeWidth={1.75} />
                     <h3 className="text-sm font-medium text-ink-50">Canonical JSON payload · Section 8</h3>
@@ -697,8 +724,8 @@ export default function App() {
         )}
       </main>
 
-      <footer className="border-t border-border py-6 text-center text-xs text-ink-700">
-        <p>DRiskify — NIVETA Platform · Skill SK-VDD-001 · Canada vendor due diligence · Confidential</p>
+      <footer className="border-t border-border py-8 text-center">
+        <p className="text-xs text-ink-700">DRiskify — NIVETA Platform · Skill SK-VDD-001 · Canada vendor due diligence · Confidential</p>
       </footer>
     </div>
   );

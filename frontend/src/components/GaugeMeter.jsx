@@ -18,9 +18,9 @@ export default function GaugeMeter({ score = 20, rating = 'Low', traffic = 'Gree
 
   return (
     <div className="flex flex-col items-center justify-center">
-      <div className="relative w-32 h-32 flex items-center justify-center">
+      <div className="relative w-36 h-36 flex items-center justify-center">
         <svg className="w-full h-full -rotate-90" viewBox="0 0 128 128">
-          <circle cx="64" cy="64" r={radius} stroke="#1a1a1a" strokeWidth="4" fill="transparent" />
+          <circle cx="64" cy="64" r={radius} stroke="rgba(255,255,255,0.06)" strokeWidth="4" fill="transparent" />
           <circle
             cx="64"
             cy="64"

@@ -1,6 +1,6 @@
 DRiskify 🛡️ (NIVETA Platform)
 AI-Native Vendor Due Diligence & Risk Intelligence Platform (SK-VDD-001)
-DRiskify autonomously scores vendors across 5 risk dimensions in parallel — Financial Viability (30%), Reputational Risk (20%), Key-Person & Governance (20%), Technology & Cyber (20%), and Regulatory Compliance (10%) — using public intelligence from authoritative Canadian and international registries, live balance sheet metrics, and a dynamic Groq LLM synthesis layer.
+DRiskify autonomously scores vendors across 5 risk dimensions in parallel — Financial Viability (30%), Reputational Risk (20%), Key-Person & Governance (20%), Technology & Cyber (20%), and Regulatory Compliance (10%) — using public intelligence from authoritative Canadian and international registries, live balance sheet metrics, and a multi-provider (Gemini → Groq → OpenAI) LLM synthesis layer with a deterministic rule-engine fallback.
 ---
 Architecture
 ```
@@ -9,22 +9,27 @@ vendoriq/
 │   ├── src/
 │   │   ├── components/   # RadarChart, GaugeMeter, DimensionCard, EscalationBanner
 │   │   ├── App.jsx       # Hero search, quick presets, 5-dimension tabs, export
-│   │   └── index.css     # Glassmorphism & dark-theme tokens
+│   │   └── index.css     # Premium minimal dark theme tokens (deep-black canvas, hairline borders, single accent color)
 │   ├── package.json
 │   └── vite.config.js
 ├── server.py             # FastAPI REST backend (serves /api and static build)
 ├── run_platform.py       # Unified platform launcher
 ├── services.py           # Orchestration — SK-VDD-001 scoring math & 4-tier rating
-├── ai_engine.py          # Groq dynamic model discovery + Signal Library synthesis
+├── ai_engine.py          # Multi-provider LLM dispatch + Autonomous Rule Engine fallback
 ├── scraper.py            # Parallel scraping: SEDAR+, CBCA, CBC, Globe & Mail, CCCS, CISA, CanLII
+├── registry_lookup.py    # Direct Corporations Canada / provincial registry lookup
+├── canlii_search.py      # Direct CanLII (canlii.org) litigation search
+├── sedarplus_lookup.py   # Direct SEDAR+ (sedarplus.ca) filing search
 ├── normalizer.py         # Suffix stripping, acronym expansion & BN validation
 ├── financial_fetcher.py  # yfinance & public filing ratio extraction
 ├── cyber_intel.py        # Real NVD CVE + CISA KEV Catalogue integrations
 ├── sanctions_check.py    # Real OFAC SDN sanctions list cross-reference
 ├── licensed_sources.py   # Licensed-source (BitSight/Refinitiv/etc.) gap disclosure
+├── frameworks.py         # Named regulatory framework alignment (OSFI Corporate Governance
+│                         #   Guideline, OSFI Guideline E-13) — evidence-based principle checks
 ├── config.py             # Section 11 configurable skill parameters (env-driven)
 ├── pdf_generator.py      # Official SK-VDD-001 PDF Summary Report generator
-└── .env                  # API keys (GROQ_API_KEY, SERPER_API_KEY)
+└── .env                  # API keys (GROQ_API_KEY, GEMINI_API_KEY, SERPER_API_KEY)
 ```
 ---
 5 Risk Dimensions (SK-VDD-001)
@@ -34,6 +39,13 @@ Reputational Risk	20%	CBC News, Globe & Mail, Financial Post, Google News, CanLI
 Key-Person Risk	20%	SEDI Insiders, LinkedIn, CBCA Registry, OFAC/OSFI Sanctions	Sanctions match, PEP, director disqualifications, single-person dependency, thin bench
 Technology & Cyber	20%	CCCS (`cyber.gc.ca`), CISA KEV, NVD ($CVSS \ge 7.0$), HaveIBeenPwned	Confirmed breaches (past 3y), active CVEs, ransomware, BitSight indicators, exposed assets
 Regulatory Compliance	10%	OSFI, FINTRAC AMPs, CSA, OPC PIPEDA, CRTC CASL	Enforcement orders, AMP penalties $> $100\text{k CAD}$, cease-trade orders. Active prohibition triggers Critical
+---
+Named Regulatory Framework Alignment
+Beyond the 5 weighted dimensions, the Key-Person/Governance and Compliance dimensions are additionally checked against a specific, named set of supplied regulatory frameworks — rather than open-ended "regulation in general" reasoning:
+- OSFI Corporate Governance Guideline — board risk oversight, independent risk committee, chair/CEO separation, code of conduct, whistleblower policy, succession planning
+- OSFI Guideline E-13 (Regulatory Compliance Management) — named compliance function, compliance framework, monitoring/testing, board reporting, remediation process, enforcement history
+
+Each principle resolves to `evidence_found`, `evidence_of_concern`, or `not_disclosed_in_available_sources` (negation-aware keyword matching against the evidence corpus) — absence of evidence is never assumed to pass or fail. Additional named frameworks can be added the same way in `frameworks.py`.
 ---
 4-Tier Rating Bands
 0 – 24: 🟢 Low — No material concerns detected. Standard onboarding may proceed.
@@ -58,6 +70,7 @@ pip install -r requirements.txt
 ```
 4. Configure `.env`
 ```env
+GEMINI_API_KEY=your_gemini_api_key
 GROQ_API_KEY=your_groq_api_key
 SERPER_API_KEY=your_serper_api_key
 ```
@@ -105,13 +118,16 @@ uvicorn
 ---
 Environment Variables
 Variable	Required	Description
-`GROQ_API_KEY`	✅	Groq API key for LLM inference
-`SERPER_API_KEY`	✅	Serper API key for web search
+`GEMINI_API_KEY`	Recommended	Google Gemini API key — first in the LLM auto-failover chain
+`GROQ_API_KEY`	✅	Groq API key for LLM inference (fallback if Gemini unavailable)
+`SERPER_API_KEY`	✅	Serper API key for web search grounding
+`OPENAI_API_KEY`	Optional	Final fallback in the LLM auto-failover chain
 ---
 Notes
 PDF reports are generated locally and not committed (see `.gitignore`)
 The SSL adapter in `scraper.py` and `financial_fetcher.py` handles Windows SSL EOF errors
 Data confidence score (20–95%) reflects evidence hit count + whether financial metrics were found
+Search grounding integrity: a quota-exhausted or misconfigured `SERPER_API_KEY` is surfaced explicitly in the API response (`search_grounding.available`) and as the first `data_gaps` entry — it never silently looks identical to "searched and found nothing" (Section 10.2)
 ---
 License
 Proprietary. Do not distribute without permission.

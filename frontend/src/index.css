@@ -3,10 +3,31 @@
 @tailwind utilities;
 
 @layer base {
+  html {
+    scroll-behavior: smooth;
+  }
   body {
-    background-color: #000000;
+    background-color: #050505;
     color: #fafafa;
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  :focus-visible {
+    outline: 2px solid rgba(79, 107, 255, 0.55);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+}
+
+@layer components {
+  /* Shared panel treatment used across the dashboard: hairline border,
+     near-black surface, and a gentle brighten-on-hover so the UI feels
+     alive without any card competing for attention. */
+  .panel {
+    @apply border border-border bg-surface rounded-2xl transition-colors duration-200;
+  }
+  .panel:hover {
+    @apply border-border-light;
   }
 }
 
@@ -19,9 +40,9 @@
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #1f1f1f;
+  background: rgba(255,255,255,0.08);
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #2e2e2e;
+  background: rgba(255,255,255,0.16);
 }

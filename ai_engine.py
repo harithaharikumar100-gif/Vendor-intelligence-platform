@@ -22,6 +22,7 @@ import config
 import licensed_sources
 import cyber_intel
 import sanctions_check
+import frameworks
 
 load_dotenv()
 
@@ -1004,6 +1005,32 @@ def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns=""
     if len(final_analyst_notes) < 100:
         final_analyst_notes = auto_fallback["synth"]["analyst_notes"]
 
+    # 7. Named Regulatory Framework Alignment (provided-framework model).
+    # Rather than open-ended "regulatory risk" reasoning, checks the evidence
+    # corpus against a specific, supplied set of named frameworks: the OSFI
+    # Corporate Governance Guideline (Key-Person & Governance dimension) and
+    # OSFI Guideline E-13 Regulatory Compliance Management (Compliance
+    # dimension). Absence of evidence is reported honestly as "not disclosed",
+    # never assumed to pass or fail (Section 9.3 no-speculation convention).
+    _kp_corpus_parts = [data.get("key_person", {}).get("text", ""), combined_profile,
+                        cat_results.get("key_person", {}).get("summary", "")]
+    for _p in cat_results.get("key_person", {}).get("persons", []):
+        _kp_corpus_parts.append(" ".join(_p.get("flags", []) or []))
+        _kp_corpus_parts.append(str(_p.get("role", "")))
+    _kp_corpus = "\n".join(x for x in _kp_corpus_parts if x)
+
+    _comp_corpus_parts = [data.get("compliance", {}).get("text", ""),
+                          cat_results.get("compliance", {}).get("summary", "")]
+    for _s in cat_results.get("compliance", {}).get("signals", []):
+        _comp_corpus_parts.append(str(_s.get("action", "")))
+        _comp_corpus_parts.append(str(_s.get("authority", "")))
+    _comp_corpus = "\n".join(x for x in _comp_corpus_parts if x)
+
+    framework_alignment = {
+        "key_person": frameworks.assess_all("key_person", _kp_corpus),
+        "compliance": frameworks.assess_all("compliance", _comp_corpus),
+    }
+
     return {
         "company_profile": company_profile,
         "risk_scores": {cat: int(cat_results[cat]["score"]) for cat in RISK_CATEGORIES},
@@ -1028,4 +1055,5 @@ def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns=""
         "data_sources_used": sources_used,
         "total_hits": int(total_hits or 0),
         "query_date": datetime.utcnow().strftime("%Y-%m-%d"),
+        "framework_alignment": framework_alignment,
     }

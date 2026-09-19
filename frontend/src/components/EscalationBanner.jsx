@@ -5,7 +5,7 @@ export default function EscalationBanner({ escalations = [] }) {
   if (!escalations || escalations.length === 0) return null;
 
   return (
-    <div className="border border-tier-critical/25 bg-tier-critical/[0.04] rounded-xl p-4">
+    <div className="border border-tier-critical/25 bg-tier-critical/[0.04] rounded-2xl p-4 shadow-subtle animate-fade-up">
       <div className="flex items-start gap-3">
         <AlertTriangle size={16} className="text-tier-critical shrink-0 mt-0.5" />
         <div className="flex-1">

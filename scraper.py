@@ -37,6 +37,29 @@ MIN_LOOKBACK_YEAR = _NOW.year - _LOOKBACK_YEARS
 
 _SERPER_CACHE = {}
 
+# Section 10.2 "Intelligence Run Failure Handling": a quota-exhausted or
+# misconfigured Serper key must not silently look identical to "searched and
+# found nothing" — every prior signal in this codebase treated them the same,
+# which meant the whole platform could run on LLM narrative alone with no
+# report-visible indication that live search grounding was missing this run.
+_SEARCH_STATUS = {"available": True, "reason": ""}
+
+
+def _mark_unavailable(reason: str):
+    _SEARCH_STATUS["available"] = False
+    _SEARCH_STATUS["reason"] = reason
+    _safe_print(f"  [!] SEARCH GROUNDING UNAVAILABLE: {reason}")
+
+
+def _mark_available():
+    _SEARCH_STATUS["available"] = True
+    _SEARCH_STATUS["reason"] = ""
+
+
+def search_grounding_status() -> dict:
+    """Current Serper availability, as observed by the most recent call(s)."""
+    return dict(_SEARCH_STATUS)
+
 
 def _safe_print(msg: str):
     try:
@@ -60,8 +83,9 @@ class SSLAdapter(HTTPAdapter):
 def _serper(query: str, num: int = 5) -> list:
     """Performs Serper Google Search with 3-retry exponential backoff and in-memory caching (SK-VDD-001 Section 10.2)."""
     if not SERPER_API_KEY:
+        _mark_unavailable("SERPER_API_KEY not configured")
         return []
-    
+
     query_key = f"{query.strip()}__num_{num}"
     if query_key in _SERPER_CACHE:
         return _SERPER_CACHE[query_key]
@@ -78,6 +102,7 @@ def _serper(query: str, num: int = 5) -> list:
                 verify=True
             )
             if r.status_code == 200:
+                _mark_available()
                 hits = [
                     {
                         "title": rc.get("title", ""),
@@ -94,7 +119,18 @@ def _serper(query: str, num: int = 5) -> list:
                 _safe_print(f"  [~] Serper retry {attempt+1}/3 for [{query[:45]}] in {backoff}s...")
                 time.sleep(backoff)
                 continue
+            elif r.status_code in (400, 401, 403):
+                # Definitive account-level failure (bad/expired key, quota
+                # exhausted) — not something a retry or a different query
+                # will fix, unlike the transient statuses above.
+                try:
+                    detail = r.json().get("message", r.text[:120])
+                except Exception:
+                    detail = r.text[:120]
+                _mark_unavailable(f"Serper HTTP {r.status_code} — {detail}")
+                return []
             else:
+                _mark_unavailable(f"Serper HTTP {r.status_code}")
                 return []
         except Exception as e:
             if attempt < 2:
@@ -102,9 +138,10 @@ def _serper(query: str, num: int = 5) -> list:
                 _safe_print(f"  [~] Serper error retry {attempt+1}/3 [{query[:45]}]: {e} — retrying in {backoff}s...")
                 time.sleep(backoff)
                 continue
-            _safe_print(f"  [!] Serper query failed after 3 retries [{query[:45]}]: {e}")
+            _mark_unavailable(f"Serper request error — {e}")
             return []
 
+    _mark_unavailable("Serper exhausted all retries (429/5xx)")
     return []
 
 
@@ -126,6 +163,11 @@ SEARCH_QUERIES = {
         '"{vendor}" ("CEO" OR founder OR "executive departure" OR "resigned" OR "appointed" OR "board of directors" OR "management") {years}',
         '"{vendor}" (site:sedarplus.ca OR "SEDI" OR "insider filings" OR "management information circular") (officer OR director OR insider)',
         '"{vendor}" ("OSFI sanctions" OR "OFAC" OR "PEP" OR "disqualified director" OR "director ban" OR "criminal record" OR "fraud") {years}',
+        # Targeted at OSFI Corporate Governance Guideline evidence (board risk
+        # oversight, independent risk committee, chair/CEO separation, code of
+        # conduct, whistleblower policy, succession plan) — without this, the
+        # governance evidence corpus rarely contains this vocabulary at all.
+        '"{vendor}" ("risk committee" OR "audit committee" OR "board oversight" OR "code of conduct" OR "code of ethics" OR "whistleblower policy" OR "succession plan" OR "independent chair")',
     ],
     "cyber": [
         '"{vendor}" (site:cyber.gc.ca OR "CCCS" OR "Canadian Centre for Cyber Security" OR "CISA" OR "advisory" OR "vulnerability") {years}',
@@ -136,6 +178,11 @@ SEARCH_QUERIES = {
         '"{vendor}" ("OSFI" OR "FINTRAC" OR "administrative monetary penalty" OR "AMP" OR "AML/ATF" OR enforcement) {years}',
         '"{vendor}" ("CSA enforcement" OR "securities commission" OR "OSC" OR "BCSC" OR "AMF" OR "cease-trade" OR penalty) {years}',
         '"{vendor}" ("Office of the Privacy Commissioner" OR "PIPEDA" OR "CRTC" OR "CASL" OR "Competition Bureau" OR violation) {years}',
+        # Targeted at OSFI Guideline E-13 evidence (a named compliance function,
+        # a formal compliance framework/program, monitoring, and board
+        # reporting) — the enforcement-focused queries above rarely surface
+        # this vocabulary since it describes an ongoing function, not an event.
+        '"{vendor}" ("chief compliance officer" OR "compliance officer" OR "compliance framework" OR "compliance program" OR "regulatory compliance management")',
     ],
 }
 
@@ -264,4 +311,5 @@ def collect_vendor_signals(vendor: str, industry: str = "", country: str = "Cana
         "business_number": business_number,
         "domain": domain_hint,
     }
+    context["search_grounding"] = search_grounding_status()
     return context
