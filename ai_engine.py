@@ -372,6 +372,25 @@ _RISK_FACTOR_LIST_INSTRUCTION = (
     "nothing more material to report after covering everything real."
 )
 
+# Confirmed live: with the score requested BEFORE the itemized findings in
+# the JSON schema, the model commits to a number before it has "written out"
+# the reasoning that would justify one - reproduced a compliance run that
+# returned score=80 while every single signal it listed was Low severity
+# and non-material, from otherwise-identical evidence that correctly scored
+# 0-15 on other attempts. Reordering the schema so the itemized list comes
+# FIRST, plus this explicit instruction, took repeated runs on the same
+# ambiguous evidence from inconsistent (0, 15, 80, 15) to consistent (0, 0,
+# 10, 10) in direct live testing.
+_SCORE_CONSISTENCY_INSTRUCTION = (
+    "The score below MUST be mathematically consistent with the severities in the list you "
+    "just wrote, not a separately-guessed number: if every item above is Low severity, the "
+    "score must be low (0-24); one Critical item alone justifies a high score even if "
+    "everything else is Low. Never pair a high score with an all-Low findings list, or a low "
+    "score with a Critical finding. Uncertainty or missing information is not itself a risk "
+    "finding - do not inflate the score for what you don't know, only for what the list above "
+    "actually says was found."
+)
+
 
 def _financial_prompt(vendor, industry, country, evidence, urls, metrics, concerns):
     m_block = ""
@@ -391,10 +410,10 @@ User Concerns: {concerns or 'None'}
 {_RISK_FACTOR_LIST_INSTRUCTION} Cover solvency, liquidity, profitability, leverage, and audit/going-concern
 signals as distinct items wherever evidence or verified financial data supports them.
 
-Return ONLY valid JSON:
+Return ONLY valid JSON, with "signals" written BEFORE "score" so the score reflects what you just found:
 {{
-  "score": <0-100 FINANCIAL RISK score, not a health/strength score: 0 means no financial risk found, 100 means severe/critical financial risk. A LOW score is GOOD (financially strong); a HIGH score is BAD (financially weak).>,
   "signals": [{{"category": "<Solvency|Liquidity|Profitability|Leverage|Audit|Growth>", "indicator": "<one complete, specific risk factor statement>", "severity": "<Low|Elevated|High|Critical>"}}],
+  "score": <0-100 FINANCIAL RISK score, not a health/strength score: 0 means no financial risk found, 100 means severe/critical financial risk. A LOW score is GOOD (financially strong); a HIGH score is BAD (financially weak). {_SCORE_CONSISTENCY_INSTRUCTION}>,
   "summary": "<2-3 sentences assessing balance sheet, leverage, and going-concern status>",
   "going_concern_flag": <true|false>,
   "evidence_urls": {json.dumps(urls[:3])}
@@ -413,10 +432,10 @@ EVIDENCE:
 {_RISK_FACTOR_LIST_INSTRUCTION} Each item is one distinct adverse-media/litigation/controversy
 finding, not a summary of several combined.
 
-Return ONLY valid JSON:
+Return ONLY valid JSON, with "articles" written BEFORE "score" so the score reflects what you just found:
 {{
-  "score": <0-100 REPUTATIONAL RISK score, not a reputation-health score: 0 means no adverse media/controversy found, 100 means severe/critical reputational risk. A LOW score is GOOD (clean reputation); a HIGH score is BAD (damaged reputation).>,
   "articles": [{{"headline": "<one specific issue, naming what actually happened>", "source": "<source>", "date": "<the actual date/month/year from the evidence if it states one, otherwise 'Date unknown' - never guess or default to 'Recent'>", "severity": "<Low|Elevated|High|Critical>", "url": ""}}],
+  "score": <0-100 REPUTATIONAL RISK score, not a reputation-health score: 0 means no adverse media/controversy found, 100 means severe/critical reputational risk. A LOW score is GOOD (clean reputation); a HIGH score is BAD (damaged reputation). {_SCORE_CONSISTENCY_INSTRUCTION}>,
   "summary": "<2-3 sentences assessing controversies and litigation history>",
   "evidence_urls": {json.dumps(urls[:3])}
 }}"""
@@ -438,10 +457,10 @@ User Concerns: {concerns or 'None'}
 List every key person you have evidence for (executives, founders, directors), each with their own
 specific, standalone flags — not a generic "Clean" for everyone unless genuinely nothing else applies.
 
-Return ONLY valid JSON:
+Return ONLY valid JSON, with "persons" written BEFORE "score" so the score reflects what you just found:
 {{
-  "score": <0-100 KEY-PERSON RISK score, not a leadership-strength score: 0 means no sanctions/governance/key-person risk found, 100 means severe/critical key-person risk. A LOW score is GOOD (stable, clean leadership); a HIGH score is BAD (sanctions hit or governance concern).>,
   "persons": [{{"name": "<executive name>", "role": "<title>", "tenure": "<tenure>", "flags": ["<specific finding, e.g. 'No OFAC/OSFI sanctions match found' or the actual concern>"], "severity": "<Low|Elevated|High|Critical>"}}],
+  "score": <0-100 KEY-PERSON RISK score, not a leadership-strength score: 0 means no sanctions/governance/key-person risk found, 100 means severe/critical key-person risk. A LOW score is GOOD (stable, clean leadership); a HIGH score is BAD (sanctions hit or governance concern). {_SCORE_CONSISTENCY_INSTRUCTION}>,
   "sanctions_match_flag": <true|false>,
   "concentration_risk": "<Low|Elevated|High>",
   "summary": "<2-3 sentences on leadership bench strength and sanctions checks>",
@@ -461,10 +480,10 @@ EVIDENCE:
 {_RISK_FACTOR_LIST_INSTRUCTION} Cover breach history, CVE/advisory exposure, ransomware, and general
 posture as distinct items.
 
-Return ONLY valid JSON:
+Return ONLY valid JSON, with "signals" written BEFORE "score" so the score reflects what you just found:
 {{
-  "score": <0-100 CYBER RISK score, not a security-posture score: 0 means no breach/CVE/advisory exposure found, 100 means severe/critical cyber risk. A LOW score is GOOD (clean cyber posture); a HIGH score is BAD (breach or critical exposure).>,
   "signals": [{{"category": "<Data Breach|CVE Exposure|Government Advisory|Ransomware|Cyber Hygiene>", "indicator": "<one complete, specific risk factor statement>", "severity": "<Low|Elevated|High|Critical>"}}],
+  "score": <0-100 CYBER RISK score, not a security-posture score: 0 means no breach/CVE/advisory exposure found, 100 means severe/critical cyber risk. A LOW score is GOOD (clean cyber posture); a HIGH score is BAD (breach or critical exposure). {_SCORE_CONSISTENCY_INSTRUCTION}>,
   "recent_breach_flag": <true|false>,
   "summary": "<2-3 sentences on breach history and cyber defense posture>",
   "evidence_urls": {json.dumps(urls[:3])}
@@ -483,11 +502,11 @@ EVIDENCE:
 {_RISK_FACTOR_LIST_INSTRUCTION} Check each relevant regulator separately (OSFI, FINTRAC, CSA, OPC/PIPEDA,
 CRTC/CASL, Competition Bureau) — one item per regulator with what was actually found for that regulator.
 
-Return ONLY valid JSON:
+Return ONLY valid JSON, with "signals" written BEFORE "score" so the score reflects what you just found:
 {{
-  "score": <0-100 COMPLIANCE RISK score, not a compliance-health score: 0 means no regulatory penalties/orders found, 100 means severe/critical compliance risk. A LOW score is GOOD (clean regulatory record); a HIGH score is BAD (active penalties or orders).>,
   "signals": [{{"authority": "<Regulator>", "action": "<one complete, specific finding for this regulator>", "material": <true if penalty exceeds CAD 100,000 else false>, "severity": "<Low|Elevated|High|Critical>"}}],
-  "prohibition_order_flag": <true|false>,
+  "score": <0-100 COMPLIANCE RISK score, not a compliance-health score: 0 means no regulatory penalties/orders found, 100 means severe/critical compliance risk. A LOW score is GOOD (clean regulatory record); a HIGH score is BAD (active penalties or orders). {_SCORE_CONSISTENCY_INSTRUCTION}>,
+  "prohibition_order_flag": <true ONLY if one of the signals above is a genuine, currently-active prohibition/cease-and-desist order - false in every other case, including "zero findings" and ordinary penalties/fines that don't bar the entity from operating. This is a Section 10.1 automatic-escalation trigger, so a false positive here is a serious, unwarranted claim.>,
   "summary": "<2-3 sentences on regulatory enforcement history>",
   "evidence_urls": {json.dumps(urls[:3])}
 }}"""
@@ -790,6 +809,44 @@ def _autonomous_fallback_engine(vendor, industry, country, concerns, financial_m
     }
 
 
+# The prompt-level fix above (signals/persons/articles listed before score,
+# plus an explicit consistency instruction) substantially reduced but did
+# not eliminate incoherent scores - confirmed live: even after that fix, a
+# cyber run on ambiguous evidence still occasionally returned a score like
+# 40 while every signal it had just listed was Low severity. LLM output is
+# inherently probabilistic; a prompt instruction lowers the odds of a
+# mismatch but can't guarantee zero. This is a deterministic backstop on
+# top of it: caps the score at the ceiling implied by the single worst
+# severity actually reported, rather than trusting an unconstrained number.
+# It only ever lowers a score, never raises one - a model that under-scores
+# relative to its own findings isn't the failure mode this exists for.
+_SEVERITY_SCORE_CEILING = {"low": 24, "elevated": 49, "high": 74, "critical": 100}
+
+
+def _clamp_score_to_evidence(cat: str, parsed: dict) -> dict:
+    array_key = {
+        "financial": "signals", "cyber": "signals", "compliance": "signals",
+        "reputation": "articles", "key_person": "persons",
+    }.get(cat)
+    if not array_key or not isinstance(parsed.get(array_key), list):
+        return parsed
+    severities = [
+        str(item.get("severity", "")).strip().lower()
+        for item in parsed[array_key] if isinstance(item, dict)
+    ]
+    severities = [s for s in severities if s in _SEVERITY_SCORE_CEILING]
+    if not severities:
+        return parsed
+    ceiling = max(_SEVERITY_SCORE_CEILING[s] for s in severities)
+    try:
+        score = float(parsed.get("score", 0))
+    except (TypeError, ValueError):
+        return parsed
+    if score > ceiling:
+        parsed["score"] = ceiling
+    return parsed
+
+
 # ── Public Entry Point ────────────────────────────────────────────────────────
 
 def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns="", financial_metrics=None):
@@ -876,6 +933,7 @@ def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns=""
             time.sleep(2)  # Space out LLM calls to stay under Groq free-tier rate limit
         cat, res = _runner()
         if isinstance(res, dict) and "score" in res:
+            res = _clamp_score_to_evidence(cat, res)
             cat_results[cat] = res
             _dim_source[cat] = "ai_synthesis"
 
