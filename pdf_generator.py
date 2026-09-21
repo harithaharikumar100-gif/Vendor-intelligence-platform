@@ -413,13 +413,37 @@ def generate_pdf(result: dict, filename: str = "vendor_report.pdf", vendor_name:
     # named set of supplied regulatory frameworks (OSFI Corporate Governance
     # Guideline, OSFI Guideline E-13) rather than open-ended regulatory
     # reasoning. Absence of evidence is reported honestly, never assumed.
+    #
+    # The disclosure paragraph below used to only describe HOW each item was
+    # judged, never WHICH frameworks or how many, or that most dimensions
+    # have no framework section at all - unlike the explicit, itemized Data
+    # Gaps section a few pages later, a reader could reasonably mistake this
+    # for a comprehensive regulatory survey. Both are now stated plainly and
+    # computed from the actual data rather than hardcoded, so the text can't
+    # drift out of sync if frameworks.py's supplied set changes later.
     framework_alignment = result.get("framework_alignment", {})
     _fw_entries = (framework_alignment.get("key_person", []) or []) + (framework_alignment.get("compliance", []) or [])
     if _fw_entries:
         elements.append(Paragraph("4. Regulatory Framework Alignment", h2_style))
+        _fw_names = []
+        for fw in _fw_entries:
+            name = fw.get("framework", "")
+            if name and name not in _fw_names:
+                _fw_names.append(name)
+        _dims_covered = {d for d, fws in framework_alignment.items() if fws}
+        _dim_labels = {k: name for k, name, _ in dims}
+        _dims_not_covered = [_dim_labels.get(d, d) for d, _, _ in dims if d not in _dims_covered]
+        _not_covered_note = (
+            f" The {', '.join(_esc(d) for d in _dims_not_covered)} dimension(s) have no framework-alignment "
+            f"section at all."
+            if _dims_not_covered else ""
+        )
         elements.append(Paragraph(
-            "Assessed against the following named frameworks supplied for this engagement — evidence-based, "
-            "not a pass/fail certification. Absence of evidence is reported honestly rather than assumed.",
+            f"Checked against exactly these {len(_fw_names)} named frameworks, supplied for this engagement — "
+            f"{'; '.join(_esc(n) for n in _fw_names)}. This is evidence-based, not a pass/fail certification, "
+            f"and absence of evidence is reported honestly rather than assumed. This is NOT an exhaustive "
+            f"regulatory survey: other applicable Canadian frameworks may exist and were not assessed here."
+            f"{_not_covered_note}",
             muted_style
         ))
         for fw in _fw_entries:

@@ -456,6 +456,7 @@ User Concerns: {concerns or 'None'}
 
 List every key person you have evidence for (executives, founders, directors), each with their own
 specific, standalone flags — not a generic "Clean" for everyone unless genuinely nothing else applies.
+List each distinct person exactly once - never repeat the same name as a separate entry.
 
 Return ONLY valid JSON, with "persons" written BEFORE "score" so the score reflects what you just found:
 {{
@@ -478,13 +479,19 @@ EVIDENCE:
 {ev}
 
 {_RISK_FACTOR_LIST_INSTRUCTION} Cover breach history, CVE/advisory exposure, ransomware, and general
-posture as distinct items.
+posture as distinct items - but ONLY where the evidence actually supports it. If you have no specific,
+dated, named incident for a category (e.g. no named breach, no dated ransomware event, no specific
+advisory), write that plainly - "No specific evidence of a [category] found in available sources" with
+severity set to the word "Low" (the field is always one of Low/Elevated/High/Critical, never true/false)
+- instead of asserting a generic unsubstantiated claim like "{vendor} has experienced a data breach in
+the past" or "{vendor} has been affected by ransomware attacks". A claim with no source and no date is
+not a finding.
 
 Return ONLY valid JSON, with "signals" written BEFORE "score" so the score reflects what you just found:
 {{
-  "signals": [{{"category": "<Data Breach|CVE Exposure|Government Advisory|Ransomware|Cyber Hygiene>", "indicator": "<one complete, specific risk factor statement>", "severity": "<Low|Elevated|High|Critical>"}}],
+  "signals": [{{"category": "<Data Breach|CVE Exposure|Government Advisory|Ransomware|Cyber Hygiene>", "indicator": "<one complete, specific risk factor statement - name the actual incident/date if asserting one occurred>", "severity": "<Low|Elevated|High|Critical>", "sources": ["<specific source URL for this item if you have one, otherwise an empty array>"]}}],
   "score": <0-100 CYBER RISK score, not a security-posture score: 0 means no breach/CVE/advisory exposure found, 100 means severe/critical cyber risk. A LOW score is GOOD (clean cyber posture); a HIGH score is BAD (breach or critical exposure). {_SCORE_CONSISTENCY_INSTRUCTION}>,
-  "recent_breach_flag": <true|false>,
+  "recent_breach_flag": <true ONLY if the signals above include a specific, dated, named data breach event backed by a real source - false in every other case, including a generic/unverified "has experienced a breach" claim with no source. This is a Section 10.1 automatic-escalation trigger, so a false positive here is a serious, unwarranted claim.>,
   "summary": "<2-3 sentences on breach history and cyber defense posture>",
   "evidence_urls": {json.dumps(urls[:3])}
 }}"""
@@ -499,12 +506,18 @@ User Concerns: {concerns or 'None'}
 EVIDENCE:
 {ev}
 
-{_RISK_FACTOR_LIST_INSTRUCTION} Check each relevant regulator separately (OSFI, FINTRAC, CSA, OPC/PIPEDA,
-CRTC/CASL, Competition Bureau) — one item per regulator with what was actually found for that regulator.
+{_RISK_FACTOR_LIST_INSTRUCTION} Check each of these SIX regulators separately, using this exact spelling
+for each - never abbreviate, substitute, or invent a different name (OPC is the Office of the Privacy
+Commissioner - do not confuse it with OPP, the Ontario Provincial Police, an unrelated police force):
+OSFI, FINTRAC, CSA, OPC, CRTC, Competition Bureau. Exactly one item per regulator, never more than one
+- if you have nothing to say about a regulator beyond "no findings," that is still exactly one Low-severity
+item for it, not zero and not a duplicate. CSA already covers its provincial member regulators (OSC,
+BCSC, AMF, etc.) - never add a separate item for one of those, fold anything about them into the single
+CSA item instead. Do not add a seventh regulator beyond this exact list of six.
 
 Return ONLY valid JSON, with "signals" written BEFORE "score" so the score reflects what you just found:
 {{
-  "signals": [{{"authority": "<Regulator>", "action": "<one complete, specific finding for this regulator>", "material": <true if penalty exceeds CAD 100,000 else false>, "severity": "<Low|Elevated|High|Critical>"}}],
+  "signals": [{{"authority": "<one of: OSFI|FINTRAC|CSA|OPC|CRTC|Competition Bureau - exactly one entry per regulator>", "action": "<one complete, specific finding for this regulator>", "material": <true if penalty exceeds CAD 100,000 else false>, "severity": "<Low|Elevated|High|Critical>", "sources": ["<specific source URL genuinely about this regulator's action for this vendor, otherwise an empty array - never reuse an unrelated URL, e.g. an app store or marketplace page, just to fill this field>"]}}],
   "score": <0-100 COMPLIANCE RISK score, not a compliance-health score: 0 means no regulatory penalties/orders found, 100 means severe/critical compliance risk. A LOW score is GOOD (clean regulatory record); a HIGH score is BAD (active penalties or orders). {_SCORE_CONSISTENCY_INSTRUCTION}>,
   "prohibition_order_flag": <true ONLY if one of the signals above is a genuine, currently-active prohibition/cease-and-desist order - false in every other case, including "zero findings" and ordinary penalties/fines that don't bar the entity from operating. This is a Section 10.1 automatic-escalation trigger, so a false positive here is a serious, unwarranted claim.>,
   "summary": "<2-3 sentences on regulatory enforcement history>",
@@ -823,6 +836,29 @@ def _autonomous_fallback_engine(vendor, industry, country, concerns, financial_m
 _SEVERITY_SCORE_CEILING = {"low": 24, "elevated": 49, "high": 74, "critical": 100}
 
 
+# Confirmed live: when instructed to write an honest "no evidence found" item
+# instead of a fabricated claim, the model can still slip a value outside the
+# Low/Elevated/High/Critical enum into "severity" (observed: the literal
+# string "False") - which would render as a broken badge in the UI/PDF even
+# though it's otherwise harmless (an unrecognized value is simply ignored by
+# the score-ceiling clamp below). This normalizes any off-enum severity to
+# "Low" so the client-facing field is always valid, regardless of prompt
+# wording.
+def _normalize_severities(cat: str, parsed: dict) -> dict:
+    array_key = {
+        "financial": "signals", "cyber": "signals", "compliance": "signals",
+        "reputation": "articles", "key_person": "persons",
+    }.get(cat)
+    if not array_key or not isinstance(parsed.get(array_key), list):
+        return parsed
+    for item in parsed[array_key]:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("severity", "")).strip().lower() not in _SEVERITY_SCORE_CEILING:
+            item["severity"] = "Low"
+    return parsed
+
+
 def _clamp_score_to_evidence(cat: str, parsed: dict) -> dict:
     array_key = {
         "financial": "signals", "cyber": "signals", "compliance": "signals",
@@ -844,6 +880,154 @@ def _clamp_score_to_evidence(cat: str, parsed: dict) -> dict:
         return parsed
     if score > ceiling:
         parsed["score"] = ceiling
+    return parsed
+
+
+# Confirmed live on two unrelated vendors (BlackBerry, Shopify): even with the
+# prompt instructed not to, the model can still set recent_breach_flag=true off
+# a generic, undated, unsourced "X has experienced a data breach in the past"
+# item - which then drives a client-facing "Confirmed Data Breach within the
+# Past 12 Months" Section 10.1 escalation banner with nothing behind it. Same
+# class of bug as prohibition_order_flag, same fix shape: a deterministic
+# backstop that only ever turns the flag OFF, never on, so a residual LLM
+# misfire can't manufacture a false escalation.
+def _validate_breach_flag(parsed: dict) -> dict:
+    if not parsed.get("recent_breach_flag"):
+        return parsed
+    signals = parsed.get("signals", [])
+    if not isinstance(signals, list):
+        signals = []
+    has_sourced_breach = any(
+        isinstance(s, dict)
+        and str(s.get("category", "")).strip().lower() == "data breach"
+        and str(s.get("severity", "")).strip().lower() in ("high", "critical")
+        and s.get("sources")
+        for s in signals
+    )
+    if not has_sourced_breach:
+        parsed["recent_breach_flag"] = False
+    return parsed
+
+
+# Confirmed live (BlackBerry run): despite the prompt explicitly listing the
+# six canonical authorities, the model added a seventh, off-list entry -
+# "Ontario Securities Commission" - as its own row, even though the prompt's
+# "CSA" item is already defined to cover CSA's provincial members (OSC,
+# BCSC, AMF). Rather than trying to enumerate every alias the model might
+# invent, this normalizes the ones the prompt's own text already names as
+# CSA members so they collapse into the single canonical CSA row via
+# _dedupe_compliance_signals below, instead of appearing as an extra,
+# redundant line the sample report's one-row-per-regulator format doesn't
+# have room for.
+_CSA_MEMBER_ALIASES = {
+    "osc", "ontario securities commission",
+    "bcsc", "british columbia securities commission",
+    "amf", "autorité des marchés financiers", "autorite des marches financieres",
+}
+
+
+def _normalize_compliance_authorities(parsed: dict) -> dict:
+    signals = parsed.get("signals")
+    if not isinstance(signals, list):
+        return parsed
+    for s in signals:
+        if not isinstance(s, dict):
+            continue
+        if str(s.get("authority", "")).strip().lower() in _CSA_MEMBER_ALIASES:
+            s["authority"] = "CSA"
+    return parsed
+
+
+# Confirmed live (BlackBerry run): despite the prompt asking for "exactly one
+# item per regulator," the model returned "OSFI" four times and dropped three
+# of the six named regulators entirely - not aligned with the sample report's
+# one-row-per-regulator breakdown. This dedupes deterministically rather than
+# relying on the prompt alone: keeps the first entry per authority (normalized
+# case/whitespace), preferring one with a non-empty severity/source over a
+# near-duplicate that has neither.
+def _dedupe_compliance_signals(parsed: dict) -> dict:
+    signals = parsed.get("signals")
+    if not isinstance(signals, list):
+        return parsed
+    seen = {}
+    order = []
+    for s in signals:
+        if not isinstance(s, dict):
+            continue
+        key = str(s.get("authority", "")).strip().lower()
+        if not key:
+            order.append(s)
+            continue
+        if key not in seen:
+            seen[key] = s
+            order.append(s)
+        else:
+            existing = seen[key]
+            if not existing.get("sources") and s.get("sources"):
+                idx = order.index(existing)
+                order[idx] = s
+                seen[key] = s
+    parsed["signals"] = order
+    return parsed
+
+
+# Confirmed live (BlackBerry run): two cyber signals came back with the
+# identical category and indicator text ("[Cybersecurity Posture] BlackBerry
+# has a strong cybersecurity posture") back to back - same duplication
+# failure mode as compliance/key-person above, just on cyber's "signals"
+# array, which has no natural identity field like "authority" or "name" to
+# key on. Dedupes by normalized indicator text instead; real CVE items are
+# unaffected since each one's indicator text includes a unique CVE ID.
+def _dedupe_cyber_signals(parsed: dict) -> dict:
+    signals = parsed.get("signals")
+    if not isinstance(signals, list):
+        return parsed
+    seen = set()
+    order = []
+    for s in signals:
+        if not isinstance(s, dict):
+            order.append(s)
+            continue
+        key = str(s.get("indicator", "")).strip().lower()
+        if not key or key not in seen:
+            if key:
+                seen.add(key)
+            order.append(s)
+    parsed["signals"] = order
+    return parsed
+
+
+# Confirmed live (BlackBerry run): the model returned John Chen and Richard
+# Stiennon as two persons, then repeated the identical two entries again
+# immediately after - same duplication failure mode as the compliance
+# authority bug above, just on the "persons" array instead of "signals".
+# Dedupes by normalized name, preferring an entry with more sources/flags
+# over a near-duplicate that has fewer.
+def _dedupe_key_person_signals(parsed: dict) -> dict:
+    persons = parsed.get("persons")
+    if not isinstance(persons, list):
+        return parsed
+    seen = {}
+    order = []
+    for p in persons:
+        if not isinstance(p, dict):
+            continue
+        key = str(p.get("name", "")).strip().lower()
+        if not key:
+            order.append(p)
+            continue
+        if key not in seen:
+            seen[key] = p
+            order.append(p)
+        else:
+            existing = seen[key]
+            existing_richness = len(existing.get("sources") or []) + len(existing.get("flags") or [])
+            candidate_richness = len(p.get("sources") or []) + len(p.get("flags") or [])
+            if candidate_richness > existing_richness:
+                idx = order.index(existing)
+                order[idx] = p
+                seen[key] = p
+    parsed["persons"] = order
     return parsed
 
 
@@ -933,7 +1117,16 @@ def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns=""
             time.sleep(2)  # Space out LLM calls to stay under Groq free-tier rate limit
         cat, res = _runner()
         if isinstance(res, dict) and "score" in res:
+            res = _normalize_severities(cat, res)
             res = _clamp_score_to_evidence(cat, res)
+            if cat == "cyber":
+                res = _dedupe_cyber_signals(res)
+                res = _validate_breach_flag(res)
+            elif cat == "compliance":
+                res = _normalize_compliance_authorities(res)
+                res = _dedupe_compliance_signals(res)
+            elif cat == "key_person":
+                res = _dedupe_key_person_signals(res)
             cat_results[cat] = res
             _dim_source[cat] = "ai_synthesis"
 
@@ -1075,7 +1268,12 @@ def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns=""
         _cyber["recent_breach_flag"] = True
     cat_results["cyber"] = _cyber
 
-    # 3b. Licensed-Source Confidence Reduction (SK-VDD-001 Section 9.2)
+    # 3b. Licensed-Source Data Gaps (SK-VDD-001 Section 9.2). This only
+    # collects the disclosure text for the report's data-gaps section - the
+    # actual confidence-score reduction this triggers happens in
+    # services.py's get_vendor_analysis, which calls
+    # licensed_sources.all_missing_data_gaps() again for that purpose (this
+    # module has no access to the confidence score being built there).
     licensed_gaps = licensed_sources.all_missing_data_gaps()
 
     # 3a. Key-Person Concentration Risk Structural Checks (SK-VDD-001 Section 6.3.3)

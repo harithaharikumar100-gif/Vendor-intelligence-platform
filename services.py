@@ -96,6 +96,50 @@ def get_risk_tier(score: float) -> tuple:
         return "Critical", RATING_BANDS["Critical"]
 
 
+def compute_confidence_score(
+    total_hits: int,
+    has_metrics: bool,
+    federal_found: bool,
+    provincial_found: bool,
+    has_profile: bool,
+    search_available: bool,
+    licensed_gap_count: int,
+) -> int:
+    """
+    SK-VDD-001 Section 11 data-confidence score.
+
+    Confirmed live: without the two deductions below, this number was a
+    near-constant 98 for any public-company run regardless of whether
+    individual lookups actually succeeded this run (a failed provincial
+    registry or corporate-profile lookup didn't move it at all) or how many
+    licensed sources are missing - Section 9.2 explicitly requires "the
+    corresponding dimension score confidence will be reduced" when
+    BitSight/World-Check/Refinitiv/Factiva aren't licensed, and nothing
+    previously implemented that.
+
+    Deliberately does NOT take canlii_litigation/sedarplus_filings/
+    serper-hit-count style "found nothing" signals as inputs - those are
+    often good news (a clean litigation record), not lookup failures, and
+    penalizing them would create a perverse "cleaner vendor -> lower
+    confidence" incentive. yfinance/has_metrics is only used once, in the
+    base tier below, not counted again as a failure signal.
+    """
+    confidence = (
+        40 if total_hits == 0 and not has_metrics else
+        65 if total_hits < 5 else
+        85 if total_hits < 15 else 95
+    )
+    if has_metrics:
+        confidence = min(confidence + 5, 98)
+
+    run_failures = sum([not federal_found, not provincial_found, not has_profile, not search_available])
+    confidence -= min(5 * run_failures, 20)
+
+    confidence -= min(licensed_gap_count, 7)
+
+    return max(confidence, 30)
+
+
 def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada", concerns: str = "",
                         company_url: str = "", business_number: str = "", ticker: str = "",
                         duns_number: str = "", naics_code: str = "") -> tuple:
@@ -319,29 +363,10 @@ def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada"
         result["compliance_score"] = scores.get("compliance", 25)
         result["compliance_signals"] = result.get("explanations", {}).get("compliance", {}).get("signals", [])
 
-        # Data Confidence Score (SK-VDD-001 Section 11)
-        total_hits = result.get("total_hits", 0)
-        has_metrics = bool(financial_metrics)
-        confidence = (
-            40 if total_hits == 0 and not has_metrics else
-            65 if total_hits < 5 else
-            85 if total_hits < 15 else 95
-        )
-        if has_metrics:
-            confidence = min(confidence + 5, 98)
-
-        # SK-VDD-001 Section 9.2: Private company confidence flag
-        # Private companies (no ticker, no SEC/SEDAR+ financials) get reduced confidence
-        has_ticker = bool(ticker.strip() or financial_metrics.get("ticker"))
-        if config.PRIVATE_CO_CONFIDENCE_FLAG and (not has_ticker or not has_metrics):
-            result["private_co_confidence_flag"] = "Reduced"
-            confidence = max(confidence - 15, 30)
-        else:
-            result["private_co_confidence_flag"] = "Standard"
-
-        result["confidence_score"] = confidence
-
-        # Source Health Tracking (SK-VDD-001 Section 5 & 10.2)
+        # Source Health Tracking (SK-VDD-001 Section 5 & 10.2) — computed
+        # before the confidence score below, since confidence should reflect
+        # whether these lookups actually succeeded this run, not just search
+        # volume.
         federal_found = registry_data.get("registries", {}).get("federal_registry", {}).get("found", False)
         provincial_found = registry_data.get("registries", {}).get("provincial_registry", {}).get("found", False)
 
@@ -381,6 +406,32 @@ def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada"
                 f"flagged and machine-translated per Section 9.2; see the affected dimension's evidence text "
                 f"for the translated summary."
             )
+
+        # Data Confidence Score (SK-VDD-001 Section 11) - see
+        # compute_confidence_score's docstring for why it takes these
+        # particular inputs and not others.
+        total_hits = result.get("total_hits", 0)
+        has_metrics = bool(financial_metrics)
+        confidence = compute_confidence_score(
+            total_hits=total_hits,
+            has_metrics=has_metrics,
+            federal_found=federal_found,
+            provincial_found=provincial_found,
+            has_profile=bool(prof_extras),
+            search_available=bool(search_grounding.get("available", True)),
+            licensed_gap_count=len(licensed_sources.all_missing_data_gaps()),
+        )
+
+        # SK-VDD-001 Section 9.2: Private company confidence flag
+        # Private companies (no ticker, no SEC/SEDAR+ financials) get reduced confidence
+        has_ticker = bool(ticker.strip() or financial_metrics.get("ticker"))
+        if config.PRIVATE_CO_CONFIDENCE_FLAG and (not has_ticker or not has_metrics):
+            result["private_co_confidence_flag"] = "Reduced"
+            confidence = max(confidence - 15, 30)
+        else:
+            result["private_co_confidence_flag"] = "Standard"
+
+        result["confidence_score"] = confidence
 
         # Section 9.1: "NIVETA shall record the retrieval timestamp for each
         # source query" — when each dimension's search actually ran, not to
