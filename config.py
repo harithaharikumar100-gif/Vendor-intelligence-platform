@@ -9,6 +9,7 @@ intent as Section 11, implemented via .env / process environment instead
 of a UI.
 """
 
+import json
 import os
 
 
@@ -84,15 +85,55 @@ ALLOWED_ORIGINS = [
     ).split(",") if o.strip()
 ]
 
-# Optional shared-secret API key. When unset (the default), no auth is
-# enforced — preserves today's local-dev behavior. When set, /api/analyze and
-# /api/download-pdf require a matching X-API-Key header; /api/health and
-# /api/presets stay open.
+# Optional Redis connection (e.g. "redis://localhost:6379/0"). When unset
+# (the default), the analysis cache, job store, and rate limiter/quota
+# counters all live in plain in-process memory - fine for one instance, but
+# silently wrong the moment this runs behind more than one replica (each
+# has its own, different state) or the process restarts (everything,
+# including in-flight job records, is dropped). Setting this makes that
+# state shared and durable instead. See store.py; a configured-but-
+# unreachable Redis logs a warning and falls back to in-memory rather than
+# crashing the service.
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
+
+# Legacy single shared-secret API key - kept for backward compatibility.
+# Prefer API_KEYS_JSON below for anything with more than one caller.
 API_KEY = os.getenv("API_KEY", "").strip()
 
-# Simple per-IP rate limit on /api/analyze — the expensive endpoint that
-# burns LLM + search quota per call. Sliding window, in-memory (single
-# process only; see the thread-safety note on ANALYSIS_CACHE for why that's
-# an acceptable scope for now).
+
+def _parse_api_keys() -> dict:
+    """API_KEYS_JSON: '{"<key>": {"client": "<name>", "daily_quota": <int
+    or null>}, ...}' - supports multiple callers, each independently
+    identifiable and independently quota-capped (distinct from the per-IP
+    burst-abuse limit below: this is a per-integration cost-control budget).
+    Falls back to a single entry from the legacy API_KEY (unlimited quota)
+    when API_KEYS_JSON isn't set, so existing single-key deployments don't
+    need to change anything. Empty (both unset) means auth is disabled -
+    preserves today's local-dev default."""
+    raw = os.getenv("API_KEYS_JSON", "").strip()
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+    if API_KEY:
+        return {API_KEY: {"client": "default", "daily_quota": None}}
+    return {}
+
+
+API_KEYS = _parse_api_keys()
+
+# Simple per-IP rate limit on the expensive endpoints (/api/analyze,
+# /api/jobs) - burns LLM + search quota per call. Sliding window; backend
+# (in-memory vs Redis) is chosen by store.create_stores() based on
+# REDIS_URL above.
 RATE_LIMIT_MAX_REQUESTS = max(1, _env_int("RATE_LIMIT_MAX_REQUESTS", 20))
 RATE_LIMIT_WINDOW_SECONDS = max(1, _env_int("RATE_LIMIT_WINDOW_SECONDS", 60))
+
+# How long a completed/failed /api/jobs record stays available for GET
+# /api/jobs/{job_id} before being evicted - long enough for a caller doing
+# occasional polling to not race a fast eviction, short enough that the
+# store doesn't grow unbounded on a long-running process.
+JOB_RETENTION_SECONDS = max(60, _env_int("JOB_RETENTION_SECONDS", 3600))

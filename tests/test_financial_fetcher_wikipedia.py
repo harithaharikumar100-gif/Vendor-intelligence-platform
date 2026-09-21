@@ -33,12 +33,15 @@ def _summary_response(extract="", wikibase_item="Q624798"):
     })
 
 
-def _wikidata_response(qid="Q624798", year="+1919-06-06T00:00:00Z"):
-    return _FakeResponse(200, {
-        "entities": {qid: {"claims": {"P571": [
-            {"mainsnak": {"datavalue": {"value": {"time": year}}}}
-        ]}}}
-    })
+def _wikidata_response(qid="Q624798", year="+1919-06-06T00:00:00Z", hq_qid=None):
+    claims = {"P571": [{"mainsnak": {"datavalue": {"value": {"time": year}}}}]}
+    if hq_qid:
+        claims["P159"] = [{"mainsnak": {"datavalue": {"value": {"id": hq_qid}}}}]
+    return _FakeResponse(200, {"entities": {qid: {"claims": claims}}})
+
+
+def _wikidata_label_response(qid, label):
+    return _FakeResponse(200, {"entities": {qid: {"labels": {"en": {"value": label}}}}})
 
 
 class TestFoundedYearFromWikidata:
@@ -110,3 +113,62 @@ class TestFoundedYearFromWikidata:
         result, sources = ff._wikipedia_financials("Canadian National Railway Company")
         assert "founded" not in result
         assert "founded" not in sources
+
+
+class TestHeadquartersFromWikidata:
+    def test_wikidata_hq_used_when_extract_has_no_trigger_phrase(self, monkeypatch):
+        """The exact bug: McCain Foods' real extract says 'established in
+        1957 in Florenceville, New Brunswick' - no 'headquartered in'/'based
+        in' phrase the regex looks for - so it fell through to an LLM guess
+        that confidently named the wrong city (Toronto)."""
+        def fake_get(url, **kwargs):
+            if "wikidata.org" in url and "Q3074056" in url:
+                return _wikidata_label_response("Q3074056", "Florenceville-Bristol")
+            if "wikidata.org" in url:
+                return _wikidata_response(hq_qid="Q3074056")
+            return _summary_response(
+                extract="McCain Foods Limited is a Canadian multinational frozen food "
+                        "company established in 1957 in Florenceville, New Brunswick, Canada."
+            )
+
+        monkeypatch.setattr(ff.requests, "get", fake_get)
+        result, sources = ff._wikipedia_financials("McCain Foods Limited")
+        assert result.get("headquarters") == "Florenceville-Bristol"
+        assert sources.get("headquarters") == "wikidata"
+
+    def test_wikidata_hq_overrides_regex_match(self, monkeypatch):
+        def fake_get(url, **kwargs):
+            if "wikidata.org" in url and "Q3074056" in url:
+                return _wikidata_label_response("Q3074056", "Florenceville-Bristol")
+            if "wikidata.org" in url:
+                return _wikidata_response(hq_qid="Q3074056")
+            return _summary_response(extract="The company is based in Toronto, a large city.")
+
+        monkeypatch.setattr(ff.requests, "get", fake_get)
+        result, sources = ff._wikipedia_financials("McCain Foods Limited")
+        assert result.get("headquarters") == "Florenceville-Bristol"
+        assert sources.get("headquarters") == "wikidata"
+
+    def test_falls_back_to_regex_when_p159_absent(self, monkeypatch):
+        def fake_get(url, **kwargs):
+            if "wikidata.org" in url:
+                return _wikidata_response()  # no hq_qid -> no P159 claim
+            return _summary_response(extract="The company is headquartered in Ottawa, Ontario.")
+
+        monkeypatch.setattr(ff.requests, "get", fake_get)
+        result, sources = ff._wikipedia_financials("Some Vendor")
+        assert result.get("headquarters") == "Ottawa"
+        assert sources.get("headquarters") == "wikipedia_extract"
+
+    def test_label_lookup_failure_falls_back_to_regex(self, monkeypatch):
+        def fake_get(url, **kwargs):
+            if "wikidata.org" in url and "Q3074056" in url:
+                return _FakeResponse(500, {})
+            if "wikidata.org" in url:
+                return _wikidata_response(hq_qid="Q3074056")
+            return _summary_response(extract="The company is headquartered in Ottawa, Ontario.")
+
+        monkeypatch.setattr(ff.requests, "get", fake_get)
+        result, sources = ff._wikipedia_financials("Some Vendor")
+        assert result.get("headquarters") == "Ottawa"
+        assert sources.get("headquarters") == "wikipedia_extract"

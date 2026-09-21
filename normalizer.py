@@ -10,12 +10,21 @@ Features:
 
 import re
 
-# Canadian and common corporate legal suffixes
+# Canadian and common corporate legal suffixes. \b treats a hyphen as a word
+# boundary just like whitespace, so \bco\.?\b matches the "Co" inside real
+# company names like "Co-operators" (a major Canadian insurer) - confirmed
+# live: normalize_vendor_name("Co-operators") returned "-operators",
+# corrupting the name used for every downstream search query and display.
+# (?<!-) / (?!-) block a match immediately adjacent to a hyphen, so a
+# suffix is only stripped when it's a genuine standalone word, not part of
+# a hyphenated compound.
 CANADIAN_SUFFIXES = [
-    r"\bincorporated\b", r"\bcorporation\b", r"\blimited\b", r"\bcompagnie\b",
-    r"\binc\.?\b", r"\bltd\.?\b", r"\bcorp\.?\b", r"\blp\.?\b", r"\bllp\.?\b",
-    r"\bulc\.?\b", r"\bco\.?\b", r"\bcie\.?\b", r"\bplc\.?\b", r"\bllc\.?\b",
-    r"\bgmbh\.?\b", r"\bsa\.?\b", r"\bag\.?\b", r"\bpvt\.?\b", r"\bholdings\b"
+    rf"{p}(?!-)" for p in [
+        r"(?<!-)\bincorporated\b", r"(?<!-)\bcorporation\b", r"(?<!-)\blimited\b", r"(?<!-)\bcompagnie\b",
+        r"(?<!-)\binc\.?\b", r"(?<!-)\bltd\.?\b", r"(?<!-)\bcorp\.?\b", r"(?<!-)\blp\.?\b", r"(?<!-)\bllp\.?\b",
+        r"(?<!-)\bulc\.?\b", r"(?<!-)\bco\.?\b", r"(?<!-)\bcie\.?\b", r"(?<!-)\bplc\.?\b", r"(?<!-)\bllc\.?\b",
+        r"(?<!-)\bgmbh\.?\b", r"(?<!-)\bsa\.?\b", r"(?<!-)\bag\.?\b", r"(?<!-)\bpvt\.?\b", r"(?<!-)\bholdings\b",
+    ]
 ]
 
 # Section 4.2: "Apply bilingual name resolution where applicable (English /

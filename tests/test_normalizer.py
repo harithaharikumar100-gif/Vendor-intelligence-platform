@@ -13,6 +13,18 @@ class TestNormalizeVendorName:
         assert normalize_vendor_name("BlackBerry Limited")["normalized_name"] == "BlackBerry"
         assert normalize_vendor_name("CGI Group Inc.")["normalized_name"] == "CGI Group"
 
+    def test_hyphenated_co_prefix_not_mangled(self):
+        """Confirmed live bug: \\b treats a hyphen as a word boundary just
+        like whitespace, so \\bco\\.?\\b matched the "Co" inside "Co-
+        operators" (a real, major Canadian insurer), corrupting the name
+        used for every downstream search query to "-operators"."""
+        assert normalize_vendor_name("Co-operators")["normalized_name"] == "Co-operators"
+        assert normalize_vendor_name("The Co-operators Group Limited")["normalized_name"] == "The Co-operators Group"
+
+    def test_other_hyphenated_suffix_words_not_mangled(self):
+        assert normalize_vendor_name("Air-Corp Logistics")["normalized_name"] == "Air-Corp Logistics"
+        assert normalize_vendor_name("Multi-Ltd Systems")["normalized_name"] == "Multi-Ltd Systems"
+
     def test_no_suffix_unchanged(self):
         # Single word, not in KNOWN_ACRONYMS, and the multi-word acronym
         # generator only fires on 2+ words -- so nothing but the raw name

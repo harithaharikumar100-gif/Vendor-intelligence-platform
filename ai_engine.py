@@ -16,7 +16,7 @@ import random
 import threading
 import requests
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as _FutureTimeoutError
 from dotenv import load_dotenv
 
 import config
@@ -71,14 +71,30 @@ def _detect_dissolution_status(evidence_text: str) -> bool:
     return False
 
 PREFERRED_MODELS = [
+    # Diagnosed live (see git history): these two return correct JSON at
+    # our real ~700-token budget, so they go first for the common case.
     "qwen/qwen3.8-27b",
-    "groq/compound",
-    "groq/compound-mini",
-    "openai/gpt-oss-120b",
-    "openai/gpt-oss-20b",
+    "allam-2-7b",
     "qwen/qwen3.6-27b",
     "llama-3.3-70b-versatile",
     "llama-3.1-8b-instant",
+    # openai/gpt-oss-* are reasoning models: confirmed live they burn nearly
+    # the entire token budget on hidden chain-of-thought (698 of 700 tokens)
+    # before ever writing an answer, which is why they always logged
+    # "returned empty response" - not flaky, structurally guaranteed at this
+    # budget. _call_groq sends reasoning_effort="low" for these specifically
+    # (confirmed live: cuts reasoning tokens to ~110-140, actually leaving
+    # room for the answer) - passing that param to a non-reasoning model is a
+    # hard 400 error, confirmed live on allam-2-7b, so it must stay scoped.
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
+    # groq/compound and groq/compound-mini deliberately excluded: they're
+    # Groq's agentic "tool use" models, not plain chat models, and confirmed
+    # live to 413 ("Request Entity Too Large") on every prompt size this
+    # pipeline sends, including the smallest (250-token profile prompt) -
+    # every attempt on them is a guaranteed-wasted round trip, and their
+    # internal tool-calling likely explains some of this session's
+    # multi-minute stalls.
 ]
 
 RISK_CATEGORIES = ["financial", "reputation", "key_person", "cyber", "compliance"]
@@ -194,22 +210,71 @@ def _call_groq(prompt: str, max_tokens: int = 400, model_hint: str = None) -> st
     with _MODELS_LOCK:
         if not _DISCOVERED_MODELS:
             try:
-                avail = [m.id for m in client.models.list().data if not any(k in m.id for k in ["whisper", "guard", "orpheus"])]
+                # "compound"/"compound-mini" excluded outright, not just left
+                # off PREFERRED_MODELS - they'd otherwise get appended here as
+                # "discovered but unlisted" and still get tried as a last
+                # resort, but they're confirmed to 413 on every prompt size
+                # this pipeline sends, so every attempt is pure wasted latency.
+                avail = [
+                    m.id for m in client.models.list().data
+                    if not any(k in m.id for k in ["whisper", "guard", "orpheus", "compound"])
+                ]
                 _DISCOVERED_MODELS = [m for m in PREFERRED_MODELS if m in avail] + [m for m in avail if m not in PREFERRED_MODELS]
             except Exception:
                 _DISCOVERED_MODELS = PREFERRED_MODELS
 
     models = [model_hint] + [m for m in _DISCOVERED_MODELS if m != model_hint] if model_hint else _DISCOVERED_MODELS
 
+    # Overall wall-clock budget across the whole model cascade for this one
+    # call. Without this, an individually-reasonable per-model timeout (20s)
+    # still multiplies across ~6 models x 2 attempts into several minutes
+    # whenever Groq's queue_time is elevated - every individual call
+    # "succeeds" within its own timeout, just slowly, so nothing else here
+    # catches it. The 5-dimension loop in analyze_vendor_full already always
+    # runs the deterministic autonomous rule engine as a backfill regardless
+    # of whether AI synthesis succeeds, so giving up on remaining models
+    # sooner costs detail, not correctness.
+    deadline = time.time() + 25
     for m_name in models:
+        if time.time() > deadline:
+            _safe_log(f"  [!] Groq cascade budget (25s) exceeded, giving up for this call")
+            break
         for attempt in range(2):
             try:
-                r = client.chat.completions.create(
+                kwargs = dict(
                     model=m_name,
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.1,
                     max_tokens=max_tokens
                 )
+                # gpt-oss-* are reasoning models: without this, they spend
+                # nearly the whole max_tokens budget on hidden chain-of-
+                # thought and return empty content (confirmed live: 698 of
+                # 700 tokens went to invisible reasoning). "low" is the
+                # minimum Groq accepts and still leaves room for an actual
+                # answer. Every other model in PREFERRED_MODELS 400s on this
+                # param (confirmed live on allam-2-7b), so it must stay
+                # scoped to gpt-oss specifically.
+                if "gpt-oss" in m_name:
+                    kwargs["reasoning_effort"] = "low"
+                # A hard EXTERNAL deadline, not just the client's own
+                # timeout=20 constructor arg - confirmed live that the SDK
+                # parameter alone does not reliably bound wall-clock time
+                # (a call stalled well past 20s with the client timeout
+                # already in place). Running the blocking call in its own
+                # one-shot thread and bounding .result() ourselves gives a
+                # real ceiling regardless of what the SDK/transport does
+                # internally. shutdown(wait=False) is deliberate: a `with`
+                # block (or wait=True) would block HERE until the abandoned
+                # thread finishes, which defeats the entire point on a call
+                # that's genuinely stuck - the thread is left to finish (or
+                # never finish) on its own and its result is discarded.
+                _ex = ThreadPoolExecutor(max_workers=1)
+                try:
+                    _fut = _ex.submit(client.chat.completions.create, **kwargs)
+                    r = _fut.result(timeout=12)
+                finally:
+                    _ex.shutdown(wait=False)
                 res = (r.choices[0].message.content or "").strip()
                 if res:
                     stripped = res.rstrip()
@@ -224,6 +289,9 @@ def _call_groq(prompt: str, max_tokens: int = 400, model_hint: str = None) -> st
                 else:
                     _safe_log(f"  [~] Groq model {m_name} returned empty response, trying next model...")
                     break
+            except _FutureTimeoutError:
+                _safe_log(f"  [!] Groq model {m_name} exceeded 12s hard timeout, trying next model...")
+                break
             except Exception as e:
                 err_str = str(e).lower()
                 if "429" in err_str or "rate limit" in err_str:
@@ -348,7 +416,7 @@ finding, not a summary of several combined.
 Return ONLY valid JSON:
 {{
   "score": <0-100 REPUTATIONAL RISK score, not a reputation-health score: 0 means no adverse media/controversy found, 100 means severe/critical reputational risk. A LOW score is GOOD (clean reputation); a HIGH score is BAD (damaged reputation).>,
-  "articles": [{{"headline": "<one specific issue, naming what actually happened>", "source": "<source>", "date": "Recent", "severity": "<Low|Elevated|High|Critical>", "url": ""}}],
+  "articles": [{{"headline": "<one specific issue, naming what actually happened>", "source": "<source>", "date": "<the actual date/month/year from the evidence if it states one, otherwise 'Date unknown' - never guess or default to 'Recent'>", "severity": "<Low|Elevated|High|Critical>", "url": ""}}],
   "summary": "<2-3 sentences assessing controversies and litigation history>",
   "evidence_urls": {json.dumps(urls[:3])}
 }}"""
@@ -440,8 +508,32 @@ Return ONLY valid JSON:
 }}"""
 
 
+def _risk_tier_label(score) -> str:
+    """Same 4-band thresholds as services.py's get_risk_tier (duplicated
+    here, not imported, since services.py imports ai_engine and importing
+    back would be circular). Used to hand the synthesis LLM an already-
+    computed verdict per dimension instead of a bare number it has to
+    interpret the direction of itself - confirmed live that prose guidance
+    alone ("low score = good") isn't a hard guarantee the model follows
+    every time; a pre-labeled tier removes that interpretive step entirely."""
+    try:
+        s = float(score)
+    except (TypeError, ValueError):
+        return "Unknown"
+    if s <= 24:
+        return "LOW RISK"
+    if s <= 49:
+        return "MEDIUM RISK"
+    if s <= 74:
+        return "HIGH RISK"
+    return "CRITICAL RISK"
+
+
 def _synthesis_prompt(vendor, industry, country, cat_results, concerns, total_hits):
-    lines = [f"- {cat.upper()} (Risk Score: {r.get('score', 25)}/100): {r.get('summary', '')[:90]}" for cat, r in cat_results.items()]
+    lines = [
+        f"- {cat.upper()} (Risk Score: {r.get('score', 25)}/100 = {_risk_tier_label(r.get('score', 25))}): {r.get('summary', '')[:90]}"
+        for cat, r in cat_results.items()
+    ]
     assessments_block = "\n".join(lines)
     return f"""Executive Risk Committee. Synthesize due diligence for {vendor} ({industry}, {country}) per SK-VDD-001.
 

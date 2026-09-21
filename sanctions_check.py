@@ -63,10 +63,16 @@ def _load_sdn() -> list:
             for cols in reader:
                 if len(cols) < 4:
                     continue
+                # OFAC's raw CSV uses a "-0-" placeholder for a blank type
+                # field (business entities, not individuals/vessels/aircraft).
+                # .strip("-") alone turns that into the literal string "0",
+                # which is truthy - the "entity" fallback below never fires,
+                # so every entity-type record was labeled sdn_type="0".
+                raw_type = cols[2].strip().strip("-").strip()
                 rows.append({
                     "ent_num": cols[0].strip(),
                     "name": cols[1].strip(),
-                    "sdn_type": cols[2].strip().strip("-").strip() or "entity",
+                    "sdn_type": raw_type if raw_type and raw_type != "0" else "entity",
                     "program": cols[3].strip(),
                     "remarks": cols[11].strip() if len(cols) > 11 else "",
                 })

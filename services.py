@@ -461,7 +461,11 @@ def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada"
                 if arr_key == "signals":
                     exp[arr_key] = [{"category": k.title(), "indicator": f"Standard {k.replace('_', ' ')} risk posture; no material adverse findings in 36-month monitoring horizon.", "severity": "Low"}]
                 elif arr_key == "articles":
-                    exp[arr_key] = [{"headline": f"Stable corporate reputation profile for {result.get('vendor_name', 'vendor')} across Canadian media landscape.", "source": "Tier-1 Media Monitoring", "date": "Recent", "severity": "Low", "url": ""}]
+                    # No "date" claim here at all - unlike the other "Recent"
+                    # fixes this session (which fabricated a date for a real
+                    # but unknown-when event), this is a "nothing adverse
+                    # found" filler with no event to date in the first place.
+                    exp[arr_key] = [{"headline": f"Stable corporate reputation profile for {result.get('vendor_name', 'vendor')} across Canadian media landscape.", "source": "Tier-1 Media Monitoring", "date": "", "severity": "Low", "url": ""}]
                 elif arr_key == "persons":
                     exp[arr_key] = [{"name": "Executive Leadership Team", "role": "Governance & Executive Management", "tenure": "Current", "flags": ["Clean - Sanctions Screening Passed", "Clean - PEP Screening Passed"], "severity": "Low"}]
             else:

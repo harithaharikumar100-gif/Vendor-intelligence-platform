@@ -381,7 +381,7 @@ def generate_pdf(result: dict, filename: str = "vendor_report.pdf", vendor_name:
                     sev_color = _hexstr(SEVERITY_COLORS.get(sev, INK_500))
                     block.append(Paragraph(
                         f"{i}.&nbsp; {_esc(a.get('headline', ''))} "
-                        f"<font color='{_hexstr(INK_500)}'>— {_esc(a.get('source', 'News'))}, {_esc(a.get('date', 'Recent'))}</font> "
+                        f"<font color='{_hexstr(INK_500)}'>— {_esc(a.get('source', 'News'))}, {_esc(a.get('date') or 'Date unknown')}</font> "
                         f"<font color='{sev_color}'><b>{_esc(str(sev).upper())}</b></font>",
                         body_style
                     ))

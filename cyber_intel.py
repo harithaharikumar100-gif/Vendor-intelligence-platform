@@ -142,6 +142,15 @@ def query_nvd_cves(vendor_or_product: str, min_cvss: float = None, max_results: 
                 "url": f"https://nvd.nist.gov/vuln/detail/{cve_id}",
                 "source": "NVD (nvd.nist.gov)",
                 "retrieved_at": result["retrieved_at"],
+                # A single-word vendor name matching a single word in free-text
+                # CVE prose is inherently weaker evidence than a genuine
+                # multi-word phrase match - confirmed live: a vendor named
+                # "Metro" matched a CVE about Windows 8's unrelated "Metro" UI
+                # design language purely because both use the bare word
+                # "Metro". No fix closes this fully (would need real entity
+                # resolution), so it's surfaced as reduced confidence instead
+                # of hidden or silently presented at full severity.
+                "ambiguous_match": " " not in vendor_or_product.strip(),
             })
             if len(cves) >= max_results:
                 break
@@ -188,7 +197,9 @@ def query_cisa_kev(vendor_or_product: str) -> dict:
             vp = str(entry.get("vendorProject", "")).lower()
             prod = str(entry.get("product", "")).lower()
             haystack = f"{vp} {prod}"
-            if _word_match(needle, haystack) or any(_word_match(w, haystack) for w in words):
+            phrase_hit = _word_match(needle, haystack)
+            word_hit = any(_word_match(w, haystack) for w in words)
+            if phrase_hit or word_hit:
                 matches.append({
                     "cve_id": entry.get("cveID", ""),
                     "vendor_project": entry.get("vendorProject", ""),
@@ -199,6 +210,13 @@ def query_cisa_kev(vendor_or_product: str) -> dict:
                     "url": f"https://nvd.nist.gov/vuln/detail/{entry.get('cveID', '')}",
                     "source": "CISA KEV Catalogue",
                     "retrieved_at": result["retrieved_at"],
+                    # Confident only when the FULL multi-word vendor phrase
+                    # matched together - a lone distinctive word (or a
+                    # single-word vendor name, where phrase and word matching
+                    # are the same thing) is the exact false-positive class
+                    # this session found (e.g. "National" alone matching an
+                    # unrelated "National Instruments" advisory).
+                    "ambiguous_match": not (phrase_hit and " " in needle),
                 })
         result["entries"] = matches[:10]
         result["total"] = len(matches)
@@ -255,13 +273,19 @@ def query_cccs_advisories(vendor_or_product: str) -> dict:
         matches = []
         for e in entries:
             title_lower = e["title"].lower()
-            if _word_match(needle, title_lower) or (words and any(_word_match(w, title_lower) for w in words)):
+            phrase_hit = _word_match(needle, title_lower)
+            word_hit = bool(words) and any(_word_match(w, title_lower) for w in words)
+            if phrase_hit or word_hit:
                 matches.append({
                     "title": e["title"],
                     "url": e["url"],
                     "updated": e["updated"],
                     "source": "CCCS (cyber.gc.ca)",
                     "retrieved_at": result["retrieved_at"],
+                    # See query_cisa_kev's identical field for the reasoning -
+                    # confident only when the full multi-word vendor phrase
+                    # matched together, not a single (possibly generic) word.
+                    "ambiguous_match": not (phrase_hit and " " in needle),
                 })
         result["entries"] = matches[:10]
         result["total"] = len(matches)
@@ -318,31 +342,53 @@ def gather_cyber_intelligence(vendor: str, domain: str = "") -> dict:
     cccs = query_cccs_advisories(vendor)
     hibp = query_hibp_domain(domain) if domain else {"breaches": [], "total": 0, "queried": False}
 
+    # A name-only match (single generic word, no corroborating multi-word
+    # phrase) is real evidence of a possible coincidence, not a confirmed
+    # finding - confirmed live for both the CVE-description and advisory-
+    # title matching paths this session (Windows "Metro" UI, "National
+    # Instruments"). Capping severity and adding a visible caveat means the
+    # finding still surfaces (required - never silently dropped) but doesn't
+    # carry the same unearned confidence as a genuine multi-word match.
+    _AMBIGUOUS_NOTE = " [Name-only match - verify this is genuinely about {vendor}, not a coincidental word match.]"
+
     signals = []
     for cve in nvd["cves"]:
+        ambiguous = cve.get("ambiguous_match", False)
+        severity = "Elevated" if ambiguous else ("Critical" if cve["cvss_base_score"] >= 9.0 else "High")
+        indicator = f"{cve['cve_id']} (CVSS {cve['cvss_base_score']}): {cve['description'][:150]}"
+        if ambiguous:
+            indicator += _AMBIGUOUS_NOTE.format(vendor=vendor)
         signals.append({
             "category": "CVE Exposure",
-            "indicator": f"{cve['cve_id']} (CVSS {cve['cvss_base_score']}): {cve['description'][:150]}",
-            "severity": "Critical" if cve["cvss_base_score"] >= 9.0 else "High",
+            "indicator": indicator,
+            "severity": severity,
             "source": cve["source"],
             "url": cve["url"],
             "retrieved_at": cve["retrieved_at"],
         })
     for entry in kev["entries"]:
+        ambiguous = entry.get("ambiguous_match", False)
+        indicator = (f"CISA KEV: {entry['cve_id']} — {entry['vulnerability_name']} (added {entry['date_added']}, "
+                     f"ransomware use: {entry['ransomware_use']})")
+        if ambiguous:
+            indicator += _AMBIGUOUS_NOTE.format(vendor=vendor)
         signals.append({
             "category": "Government Advisory",
-            "indicator": f"CISA KEV: {entry['cve_id']} — {entry['vulnerability_name']} (added {entry['date_added']}, "
-                         f"ransomware use: {entry['ransomware_use']})",
-            "severity": "Critical",
+            "indicator": indicator,
+            "severity": "Elevated" if ambiguous else "Critical",
             "source": entry["source"],
             "url": entry["url"],
             "retrieved_at": entry["retrieved_at"],
         })
     for entry in cccs["entries"]:
+        ambiguous = entry.get("ambiguous_match", False)
+        indicator = f"CCCS Advisory: {entry['title']} (updated {entry['updated'][:10]})"
+        if ambiguous:
+            indicator += _AMBIGUOUS_NOTE.format(vendor=vendor)
         signals.append({
             "category": "Government Advisory",
-            "indicator": f"CCCS Advisory: {entry['title']} (updated {entry['updated'][:10]})",
-            "severity": "High",
+            "indicator": indicator,
+            "severity": "Elevated" if ambiguous else "High",
             "source": entry["source"],
             "url": entry["url"],
             "retrieved_at": entry["retrieved_at"],

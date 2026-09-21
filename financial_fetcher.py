@@ -31,6 +31,17 @@ class SSLAdapter(HTTPAdapter):
 load_dotenv()
 SERPER_API_KEY = os.getenv("SERPER_API_KEY", "")
 
+# Shared by every "X employees" regex match below: a candidate sitting next
+# to language like this is describing a past point in time (often the
+# company's founding), not current headcount - confirmed live for McCain
+# Foods (~20,000 employees today), where the only "X employees" mention
+# findable in real scraped text was "in their first year of production, the
+# company hired 30 employees."
+_HISTORICAL_CONTEXT = re.compile(
+    r'\b(first year|initially|originally|at the time|when it was founded|'
+    r'started with|began with|in \d{4}\b)'
+)
+
 
 def _safe_print(msg: str):
     """Safely print messages preventing cp1252 Windows crashes."""
@@ -429,17 +440,24 @@ def _wikipedia_financials(vendor: str) -> tuple[dict, dict]:
             extract = d.get("extract", "")
             tl = extract.lower()
 
-            # Employees: "X,XXX employees" or "XX,000 people"
-            m = re.search(r'([\d,]+)\s+(?:employees|people|staff|workforce)', tl)
-            if m:
-                emp_str = m.group(1).replace(",", "")
+            # Employees: "X,XXX employees" or "XX,000 people" - largest of
+            # all matches, not the first, skipping historical-context
+            # mentions (see the identical fix and its rationale in
+            # _scrape_profile's employees regex below).
+            emp_candidates = []
+            for m in re.finditer(r'([\d,]+)\s+(?:employees|people|staff|workforce)', tl):
+                window_start = max(0, m.start() - 60)
+                if _HISTORICAL_CONTEXT.search(tl[window_start:m.start()]):
+                    continue
                 try:
-                    emp_int = int(emp_str)
+                    emp_int = int(m.group(1).replace(",", ""))
                     if 10 <= emp_int <= 5_000_000:
-                        out["employees"] = f"{emp_int:,}"
-                        src["employees"] = "wikipedia_extract"
+                        emp_candidates.append(emp_int)
                 except Exception:
                     pass
+            if emp_candidates:
+                out["employees"] = f"{max(emp_candidates):,}"
+                src["employees"] = "wikipedia_extract"
 
             # Revenue: "$X.X billion" or "$X million" near "revenue"
             for pat in [
@@ -463,7 +481,8 @@ def _wikipedia_financials(vendor: str) -> tuple[dict, dict]:
                     except Exception:
                         pass
 
-            # Headquarters
+            # Headquarters (regex candidate; Wikidata below overrides this
+            # when available, same priority as founded)
             for pat in [
                 r'headquartered in ([A-Za-z][A-Za-z\s,\.\-]+?)(?:\.|,\s+[A-Z]|\n|;)',
                 r'based in ([A-Za-z][A-Za-z\s,\.]+?)(?:\.|,\s+[A-Z]|\n)',
@@ -476,16 +495,26 @@ def _wikipedia_financials(vendor: str) -> tuple[dict, dict]:
                         src["headquarters"] = "wikipedia_extract"
                         break
 
-            # Founded year: the REST summary's "extract" is just the lead
-            # paragraph, which frequently never states a founding year at all
-            # (confirmed live: CN Rail's real extract text has none) — when
-            # that regex misses, the pipeline previously fell through to an
-            # LLM free-recall guess, which is exactly what produced two
-            # different answers (1919, then 1922 - only one correct) across
-            # two otherwise-identical runs. Wikidata's P571 ("inception")
-            # property is structured and deterministic, so it's tried first
-            # via the Wikidata item id this same summary response already
-            # returns, before ever falling back to the regex/LLM path.
+            # Wikidata structured lookups - tried before ever falling back to
+            # regex/LLM guesses, fetched once and reused for both properties.
+            #
+            # Founded (P571 "inception"): the REST summary's "extract" is
+            # just the lead paragraph, which frequently never states a
+            # founding year at all (confirmed live: CN Rail's real extract
+            # has none) - when the regex missed, the pipeline previously
+            # fell through to an LLM free-recall guess, which is exactly
+            # what produced two different answers (1919, then 1922 - only
+            # one correct) across two otherwise-identical runs.
+            #
+            # Headquarters (P159 "headquarters location"): confirmed live
+            # for McCain Foods - the lead extract says "established in 1957
+            # in Florenceville, New Brunswick" (no "headquartered in"/"based
+            # in" trigger phrase the regex looks for), so the regex above
+            # correctly found nothing and the pipeline fell through to an
+            # LLM guess that confidently said the wrong city ("Toronto"
+            # instead of the real Florenceville-Bristol). P159's value is a
+            # reference to another Wikidata item, so resolving it costs one
+            # extra lookup for that item's English label.
             qid = d.get("wikibase_item", "")
             if qid:
                 try:
@@ -495,14 +524,25 @@ def _wikipedia_financials(vendor: str) -> tuple[dict, dict]:
                         timeout=8,
                     )
                     if wd.status_code == 200:
-                        inception = (
-                            wd.json()["entities"][qid]["claims"]["P571"][0]
-                            ["mainsnak"]["datavalue"]["value"]["time"]
-                        )
-                        ym = re.search(r'([+-]\d{4})-\d{2}-\d{2}', inception)
-                        if ym:
-                            out["founded"] = str(abs(int(ym.group(1))))
-                            src["founded"] = "wikidata"
+                        claims = wd.json()["entities"][qid]["claims"]
+                        if "P571" in claims:
+                            inception = claims["P571"][0]["mainsnak"]["datavalue"]["value"]["time"]
+                            ym = re.search(r'([+-]\d{4})-\d{2}-\d{2}', inception)
+                            if ym:
+                                out["founded"] = str(abs(int(ym.group(1))))
+                                src["founded"] = "wikidata"
+                        if "P159" in claims:
+                            hq_qid = claims["P159"][0]["mainsnak"]["datavalue"]["value"]["id"]
+                            hq_r = requests.get(
+                                f"https://www.wikidata.org/wiki/Special:EntityData/{hq_qid}.json",
+                                headers={"User-Agent": "DRiskify/2.0 (vendor-due-diligence)"},
+                                timeout=8,
+                            )
+                            if hq_r.status_code == 200:
+                                hq_label = hq_r.json()["entities"][hq_qid]["labels"].get("en", {}).get("value")
+                                if hq_label:
+                                    out["headquarters"] = hq_label
+                                    src["headquarters"] = "wikidata"
                 except Exception:
                     pass
 
@@ -650,10 +690,26 @@ def _scrape_profile(vendor: str, country: str = "Canada", company_url: str = "")
             p["headquarters"] = hq_val
             src["headquarters"] = "web_scrape"
 
-    # Employees regex
-    m = re.search(r'\b(\d{1,3}(?:,\d{3})+|\d{2,6})\s+(?:employees|people|workforce|staff)\b', tl)
-    if m:
-        p["employees"] = m.group(1)
+    # Employees regex - takes the LARGEST of all matches, not the first, and
+    # skips matches sitting next to historical-context language.
+    # Confirmed live: for McCain Foods (~20,000 employees today), the ONLY
+    # match found in real scraped text was "in their first year of
+    # production, the company hired 30 employees" - a real sentence, but
+    # describing their 1957 founding year, not current headcount. Taking the
+    # max only helps when a current-scale mention is ALSO present somewhere
+    # in the text; when it isn't (as here), the historical figure needs to
+    # be excluded outright rather than confidently reported as current -
+    # better to find nothing than to state a number known to be about the
+    # wrong point in time.
+    emp_candidates = []
+    for m in re.finditer(r'\b(\d{1,3}(?:,\d{3})+|\d{2,6})\s+(?:employees|people|workforce|staff)\b', tl):
+        window_start = max(0, m.start() - 60)
+        if _HISTORICAL_CONTEXT.search(tl[window_start:m.start()]):
+            continue
+        emp_candidates.append(m.group(1))
+    if emp_candidates:
+        best = max(emp_candidates, key=lambda s: int(s.replace(",", "")))
+        p["employees"] = best
         src["employees"] = "web_scrape"
 
     # 3. Groq Dual Knowledge + Context Synthesis

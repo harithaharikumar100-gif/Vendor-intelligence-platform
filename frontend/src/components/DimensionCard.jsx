@@ -121,7 +121,7 @@ export default function DimensionCard({ title, weight, score, sources, summary, 
                   <span className={`w-1.5 h-1.5 rounded-full mt-1.5 shrink-0 ${severityDot(a.severity)}`} />
                   <div className="flex-1">
                     <p className="text-ink-200">{a.headline}</p>
-                    <p className="text-[11px] text-ink-500 mt-0.5">{a.source} · {a.date}</p>
+                    <p className="text-[11px] text-ink-500 mt-0.5">{a.source} · {a.date || 'Date unknown'}</p>
                   </div>
                   <span className={`text-[11px] font-medium uppercase tracking-wide shrink-0 ${severityText(a.severity)}`}>
                     {a.severity || 'Info'}

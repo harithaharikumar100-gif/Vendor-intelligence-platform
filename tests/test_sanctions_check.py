@@ -60,3 +60,33 @@ class TestNormalizeName:
         tokens = sc._normalize_name("SMITH, John")
         assert "smith" in tokens
         assert "john" in tokens
+
+
+class TestLoadSdnTypeParsing:
+    """OFAC's raw SDN.csv uses a '-0-' placeholder for a blank type field
+    (business entities, not individuals/vessels/aircraft). Confirmed live
+    against the real feed: .strip("-") alone turns that into the literal
+    string "0", which is truthy, so the "entity" fallback never fired and
+    every entity-type record was labeled sdn_type="0" instead."""
+
+    def test_dash_zero_dash_placeholder_becomes_entity(self, monkeypatch):
+        sc._SDN_CACHE["rows"] = None
+
+        class FakeResponse:
+            status_code = 200
+            text = "36,AEROCARIBBEAN AIRLINES,-0-,CUBA\n"
+
+        monkeypatch.setattr(sc.requests, "get", lambda *a, **k: FakeResponse())
+        rows = sc._load_sdn()
+        assert rows[0]["sdn_type"] == "entity"
+
+    def test_real_type_value_passes_through_unchanged(self, monkeypatch):
+        sc._SDN_CACHE["rows"] = None
+
+        class FakeResponse:
+            status_code = 200
+            text = "1001,ZAWAHIRI Ayman al,individual,SDGT\n"
+
+        monkeypatch.setattr(sc.requests, "get", lambda *a, **k: FakeResponse())
+        rows = sc._load_sdn()
+        assert rows[0]["sdn_type"] == "individual"

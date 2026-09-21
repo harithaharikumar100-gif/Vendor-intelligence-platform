@@ -79,6 +79,51 @@ export default function App() {
       .catch(() => {});
   }, [vendorInput]);
 
+  // Submit-then-poll against /api/jobs instead of blocking on /api/analyze
+  // directly - a real run has been observed taking anywhere from ~90s to
+  // 15+ minutes depending on upstream LLM/search latency, and a single
+  // held-open fetch for that long is fragile (a lost wifi connection, a
+  // laptop sleeping, or a proxy's own idle-connection timeout all kill it
+  // outright with nothing to resume). Polling survives all of those the
+  // same way refreshing a page you're waiting on would.
+  const POLL_INTERVAL_MS = 3000;
+  const MAX_CONSECUTIVE_POLL_ERRORS = 5;
+
+  const pollJob = async (jobId) => {
+    let consecutiveErrors = 0;
+    // No overall wall-clock cap here by design - the backend's own
+    // per-dimension timeouts already bound how long a run can take, and a
+    // caller who navigates away simply stops polling (see the cleanup
+    // effect below); there's no scenario where polling forever is the
+    // wrong failure mode to fall into.
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      let job;
+      try {
+        const res = await fetch(`/api/jobs/${jobId}`);
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.detail || `Job status check failed (HTTP ${res.status}).`);
+        }
+        job = await res.json();
+        consecutiveErrors = 0;
+      } catch (err) {
+        // A single dropped poll (a network blip) shouldn't abort a run
+        // that might otherwise still be minutes from finishing - only
+        // give up after several in a row.
+        consecutiveErrors += 1;
+        if (consecutiveErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
+          throw new Error(`Lost contact with the analysis job: ${err.message}`);
+        }
+        continue;
+      }
+      if (job.status === 'complete') return { data: job.result };
+      if (job.status === 'failed') return { error: job.error || 'Due diligence analysis failed.' };
+      // else "pending" or "running" - keep polling
+    }
+  };
+
   const handleRunAnalysis = async (
     vName = vendorInput,
     vInd = industry,
@@ -92,12 +137,16 @@ export default function App() {
     setError(null);
     setLoadingStep(1);
 
+    // Purely cosmetic "still working" progression, decoupled from actual
+    // job status - the four phases it names are real (and roughly in this
+    // order), but nothing here reads real backend state; that's what
+    // pollJob is for.
     const stepInterval = setInterval(() => {
       setLoadingStep((prev) => (prev < 4 ? prev + 1 : prev));
     }, 1200);
 
     try {
-      const res = await fetch('/api/analyze', {
+      const submitRes = await fetch('/api/jobs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -113,19 +162,22 @@ export default function App() {
         }),
       });
 
-      clearInterval(stepInterval);
-
-      if (!res.ok) {
-        const errData = await res.json();
-        throw new Error(errData.detail || 'Due diligence analysis failed.');
+      if (!submitRes.ok) {
+        const errData = await submitRes.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Failed to submit due diligence job.');
       }
 
-      const data = await res.json();
-      setResult(data);
+      const { job_id: jobId } = await submitRes.json();
+      const outcome = await pollJob(jobId);
+
+      if (outcome.error) {
+        throw new Error(outcome.error);
+      }
+      setResult(outcome.data);
     } catch (err) {
-      clearInterval(stepInterval);
       setError(err.message);
     } finally {
+      clearInterval(stepInterval);
       setLoading(false);
       setLoadingStep(0);
     }

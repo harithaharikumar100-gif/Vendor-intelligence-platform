@@ -10,7 +10,22 @@ All calls are defensive — never raises; returns empty dict on any failure.
 """
 
 import re
+from datetime import datetime
 from financial_fetcher import _serper, _webpage
+import config
+
+# Same lookback computation as scraper.py's _YEARS_CLAUSE, duplicated here
+# (not imported - no circular-import risk, but these are genuinely just two
+# small derived constants, not worth coupling this module to scraper.py for).
+# Confirmed live: without ANY recency constraint here, a search for "Royal
+# Bank of Canada" litigation returned Supreme Court cases from 1915, 1921,
+# 1926, 1931, 1947, 1964, 1995, and 1997 - directly contradicting the SK-
+# VDD-001 spec's explicit 36-month lookback window (Section 2.2/11), and
+# silently corrupting the reputation dimension's evidence with irrelevant
+# century-old case law a landmark-precedent-weighted search engine surfaces
+# for any long-established institution.
+_LOOKBACK_YEARS = max(1, config.LOOKBACK_MONTHS // 12)
+_MIN_LOOKBACK_YEAR = datetime.utcnow().year - _LOOKBACK_YEARS
 
 
 def _safe_print(msg: str):
@@ -41,9 +56,10 @@ def search_litigation(vendor: str) -> dict:
     """Search CanLII for litigation involving the vendor."""
     results = {"cases": [], "total": 0, "source": "CanLII (canlii.org)"}
     try:
+        years_clause = " OR ".join(str(y) for y in range(_MIN_LOOKBACK_YEAR, datetime.utcnow().year + 1))
         queries = [
-            f'"{vendor}" site:canlii.org (lawsuit OR litigation OR "class action" OR "court" OR "tribunal") 2024 OR 2025 OR 2026',
-            f'"{vendor}" site:canlii.org (settlement OR "enforcement" OR "penalty" OR "injunction" OR "judgment")',
+            f'"{vendor}" site:canlii.org (lawsuit OR litigation OR "class action" OR "court" OR "tribunal") {years_clause}',
+            f'"{vendor}" site:canlii.org (settlement OR "enforcement" OR "penalty" OR "injunction" OR "judgment") {years_clause}',
         ]
 
         hits = []
@@ -60,6 +76,7 @@ def search_litigation(vendor: str) -> dict:
             return results
 
         cases = []
+        skipped_stale = 0
         for h in hits[:15]:
             title = h.get("title", "")
             snippet = h.get("snippet", "")
@@ -78,6 +95,26 @@ def search_litigation(vendor: str) -> dict:
             if m:
                 citation = m.group(1)
 
+            # The query-level year hint above is a search-engine RANKING
+            # signal, not a hard filter - Serper still returns highly-cited
+            # landmark cases outside it for any long-established institution
+            # (confirmed live: Royal Bank of Canada cases from 1915-1997).
+            # A case's citation year is a real, structured fact, so it's
+            # used as a deterministic filter here rather than trusting the
+            # search query alone. This intentionally does NOT reuse the
+            # `citation` field above - that regex requires an ALL-CAPS court
+            # code (e.g. "SCC", "ONSC") and silently fails to match CanLII's
+            # own internal citation format "1926 CanLII 32 (SCC)" (mixed-
+            # case "CanLII"), which is exactly the format every stale case
+            # in the confirmed live test used - so filtering only on
+            # `citation` being non-empty missed every one of them. A case
+            # with no extractable year at all is kept rather than dropped -
+            # excluding only on a positive, confirmed "this is stale" signal.
+            year_match = re.search(r'\b(19\d{2}|20\d{2})\b', title)
+            if year_match and int(year_match.group(1)) < _MIN_LOOKBACK_YEAR:
+                skipped_stale += 1
+                continue
+
             # Determine severity from snippet keywords
             sev = "Low"
             sev_text = (snippet + " " + title).lower()
@@ -86,15 +123,24 @@ def search_litigation(vendor: str) -> dict:
             elif any(k in sev_text for k in ["settlement", "violation", "enforcement", "sanction"]):
                 sev = "Elevated"
 
+            # "Recent" was a fabricated claim whenever Serper simply didn't
+            # return a date field (common) - a real extracted year, when
+            # available, is preferred; otherwise say plainly that it's
+            # unknown rather than asserting recency with no evidence.
+            display_date = date or citation or (year_match.group(1) if year_match else "") or "Date unknown"
+
             cases.append({
                 "case_name": title[:200],
                 "citation": citation,
                 "court": court,
-                "date": date or "Recent",
+                "date": display_date,
                 "summary": snippet[:300],
                 "severity": sev,
                 "url": url,
             })
+
+        if skipped_stale:
+            _safe_print(f"  [~] CanLII: excluded {skipped_stale} case(s) older than the {_LOOKBACK_YEARS}-year lookback window for {vendor}")
 
         results["cases"] = cases
         results["total"] = len(cases)
