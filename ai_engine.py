@@ -462,7 +462,7 @@ Return ONLY valid JSON, with "persons" written BEFORE "score" so the score refle
 {{
   "persons": [{{"name": "<executive name>", "role": "<title>", "tenure": "<tenure>", "flags": ["<specific finding, e.g. 'No OFAC/OSFI sanctions match found' or the actual concern>"], "severity": "<Low|Elevated|High|Critical>"}}],
   "score": <0-100 KEY-PERSON RISK score, not a leadership-strength score: 0 means no sanctions/governance/key-person risk found, 100 means severe/critical key-person risk. A LOW score is GOOD (stable, clean leadership); a HIGH score is BAD (sanctions hit or governance concern). {_SCORE_CONSISTENCY_INSTRUCTION}>,
-  "sanctions_match_flag": <true|false>,
+  "sanctions_match_flag": <true ONLY if one of the persons above has a genuine, specific sanctions/PEP/disqualification hit named in their own flags - false in every other case, including when every person above is clean. This is a Section 10.1 automatic-escalation trigger, so a false positive here is a serious, unwarranted claim.>,
   "concentration_risk": "<Low|Elevated|High>",
   "summary": "<2-3 sentences on leadership bench strength and sanctions checks>",
   "evidence_urls": {json.dumps(urls[:3])}
@@ -909,6 +909,30 @@ def _validate_breach_flag(parsed: dict) -> dict:
     return parsed
 
 
+# Confirmed live (BlackBerry run): sanctions_match_flag came back true while
+# every person in the persons list the model had just written showed a clean
+# severity ("Low") and no sanctions-related flag - the exact same failure
+# mode as recent_breach_flag above and prohibition_order_flag in compliance,
+# just on key-person's own escalation trigger. Same fix shape: only allow
+# the flag to stand if a person in that same list is actually flagged
+# High/Critical, which is the same structured severity signal already used
+# throughout this file (_SEVERITY_SCORE_CEILING) rather than fragile
+# free-text matching on each person's "flags" wording.
+def _validate_sanctions_flag(parsed: dict) -> dict:
+    if not parsed.get("sanctions_match_flag"):
+        return parsed
+    persons = parsed.get("persons", [])
+    if not isinstance(persons, list):
+        persons = []
+    has_flagged_person = any(
+        isinstance(p, dict) and str(p.get("severity", "")).strip().lower() in ("high", "critical")
+        for p in persons
+    )
+    if not has_flagged_person:
+        parsed["sanctions_match_flag"] = False
+    return parsed
+
+
 # Confirmed live (BlackBerry run): despite the prompt explicitly listing the
 # six canonical authorities, the model added a seventh, off-list entry -
 # "Ontario Securities Commission" - as its own row, even though the prompt's
@@ -1031,6 +1055,75 @@ def _dedupe_key_person_signals(parsed: dict) -> dict:
     return parsed
 
 
+# Confirmed live (BlackBerry run): _reputational_prompt hard-truncates the
+# evidence it hands the model to 800 chars, so a URL sitting near that
+# cutoff can come out chopped mid-path (observed:
+# "https://financialpost.com/news/judge-"), and the model faithfully echoes
+# the truncated string as if it were the complete source link - a broken
+# citation a client would hit as a 404. Repairs this deterministically only
+# for URLs bearing the truncation signature (ending in "-" or "_", which a
+# legitimate URL essentially never does): if it's an unambiguous prefix of
+# one of the full, untruncated URLs already known for this vendor/dimension,
+# replaces it with the complete URL; otherwise clears it to an empty string
+# rather than serve a link that won't resolve. Never touches a URL that
+# doesn't show that signature, so an otherwise-unfamiliar but well-formed
+# URL is left alone rather than second-guessed.
+def _repair_truncated_urls(parsed: dict, known_urls) -> dict:
+    articles = parsed.get("articles")
+    if not isinstance(articles, list):
+        return parsed
+    for a in articles:
+        if not isinstance(a, dict):
+            continue
+        url = str(a.get("url", "")).strip()
+        if not url or url[-1] not in "-_":
+            continue
+        matches = [u for u in (known_urls or []) if u.startswith(url)]
+        a["url"] = matches[0] if len(matches) == 1 else ""
+    return parsed
+
+
+_ATTRITION_KEYWORDS = ["resigned", "departed", "stepped down", "left the company", "fired", "terminated"]
+
+
+# The prior version of this check counted DISTINCT ATTRITION KEYWORDS present
+# anywhere in the raw scraped evidence blob, with no link to a specific
+# person and no time-scoping despite the escalation message claiming
+# "12-month lookback" - one person described two ways ("resigned ... he
+# later said he'd stepped down") would false-positive a "2+ C-suite exits"
+# escalation, and a departure from years ago counted identically to one from
+# last month. This version requires each hit to be in the SAME SENTENCE as
+# a specific named person already extracted into the persons list (a fixed
+# character window was tried first but bled adjacent people's sentences into
+# each other in short evidence text - "Jane Smith resigned. Bob Jones
+# continues to lead the team." falsely attributed "resigned" to Bob too) and
+# (b), if any year is present in that same sentence, that it not be stale
+# relative to the configured lookback - the same "no year found = keep it,
+# a stale year found = drop it" philosophy already used for CanLII
+# litigation staleness elsewhere in this codebase, so an undated mention
+# isn't penalized for something it never claimed.
+def _detect_recent_attrition(kp_persons, kp_evidence):
+    if not kp_evidence:
+        return 0, []
+    sentences = re.split(r"(?<=[.!?])\s+", kp_evidence.lower())
+    min_year = datetime.utcnow().year - max(1, config.LOOKBACK_MONTHS // 12)
+    attrited = []
+    for person in kp_persons:
+        name = str(person.get("name", "")).strip()
+        if len(name) < 3:
+            continue
+        name_lower = name.lower()
+        for sentence in sentences:
+            if name_lower not in sentence or not any(kw in sentence for kw in _ATTRITION_KEYWORDS):
+                continue
+            years_in_sentence = [int(y) for y in re.findall(r"\b(19\d{2}|20\d{2})\b", sentence)]
+            if years_in_sentence and max(years_in_sentence) < min_year:
+                continue  # only years found in this sentence are stale - don't count
+            attrited.append(name)
+            break
+    return len(attrited), attrited
+
+
 # ── Public Entry Point ────────────────────────────────────────────────────────
 
 def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns="", financial_metrics=None):
@@ -1082,6 +1175,8 @@ def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns=""
         urls = data.get("reputation", {}).get("urls", [])
         raw = _llm_dispatch(_reputational_prompt(vendor, industry, country, ev, urls, concerns), 700)
         p = _parse_json(raw)
+        if isinstance(p, dict):
+            p = _repair_truncated_urls(p, urls)
         return "reputation", p
 
     def _run_kp():
@@ -1127,6 +1222,7 @@ def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns=""
                 res = _dedupe_compliance_signals(res)
             elif cat == "key_person":
                 res = _dedupe_key_person_signals(res)
+                res = _validate_sanctions_flag(res)
             cat_results[cat] = res
             _dim_source[cat] = "ai_synthesis"
 
@@ -1302,18 +1398,21 @@ def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns=""
         })
         if _kp.get("concentration_risk") != "High":
             _kp["concentration_risk"] = "Elevated"
-    # Recent attrition (2+ C-suite departures in 12 months)
-    _attrition_keywords = ["resigned", "departed", "stepped down", "left the company", "fired", "terminated"]
-    _attrition_count = sum(1 for kw in _attrition_keywords if kw in _kp_evidence)
+    # Recent attrition (2+ named executives showing departure language)
+    _attrition_count, _attrited_names = _detect_recent_attrition(_kp_persons, _kp_evidence)
     if _attrition_count >= 2:
         _structural_signals.append({
             "name": "Recent Attrition",
             "role": "Governance",
-            "flags": [f"Recent attrition — {_attrition_count} executive departure(s) detected in 12-month lookback"],
+            "flags": [
+                f"Recent attrition — {_attrition_count} named executive(s) "
+                f"({', '.join(_attrited_names)}) show departure language in evidence within the "
+                f"{config.LOOKBACK_MONTHS}-month lookback window"
+            ],
             "severity": "High"
         })
         _kp["concentration_risk"] = "High"
-        _kp_escalation = "Key-Person Attrition (2+ C-suite exits in 12 months)"
+        _kp_escalation = f"Key-Person Attrition (2+ named executives show departure language within the {config.LOOKBACK_MONTHS}-month lookback window)"
 
     if _structural_signals:
         _kp.setdefault("persons", []).extend(_structural_signals)

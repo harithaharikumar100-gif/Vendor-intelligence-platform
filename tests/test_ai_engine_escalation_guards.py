@@ -28,6 +28,13 @@ score-consistency fix:
   Commission") alongside the six canonical ones, duplicating what the "CSA"
   entry is already defined to cover. Folds known CSA-member aliases into
   "CSA" before dedup runs.
+
+- _validate_sanctions_flag: confirmed live (BlackBerry run, in a real PDF
+  generated and sent to the client) that sanctions_match_flag can be true
+  while every person just listed shows clean/Low severity - driving a
+  client-facing "Key Person Sanctions Match (OFAC / OSFI / UN / EU)"
+  escalation with nothing in the report body backing it up. Same fix shape
+  as _validate_breach_flag: only ever turns the flag OFF, never on.
 """
 import ai_engine as ae
 
@@ -406,3 +413,55 @@ class TestNormalizeComplianceAuthorities:
         parsed = {"signals": "not a list"}
         result = ae._normalize_compliance_authorities(parsed)
         assert result["signals"] == "not a list"
+
+
+class TestValidateSanctionsFlag:
+    def test_false_flag_is_left_alone(self):
+        parsed = {"sanctions_match_flag": False, "persons": []}
+        result = ae._validate_sanctions_flag(parsed)
+        assert result["sanctions_match_flag"] is False
+
+    def test_true_flag_with_no_persons_is_cleared(self):
+        parsed = {"sanctions_match_flag": True, "persons": []}
+        result = ae._validate_sanctions_flag(parsed)
+        assert result["sanctions_match_flag"] is False
+
+    def test_true_flag_with_all_clean_low_severity_persons_is_cleared(self):
+        """The exact bug reproduced live: flag true, every person clean/Low."""
+        parsed = {
+            "sanctions_match_flag": True,
+            "persons": [
+                {"name": "John Chen", "flags": ["No OFAC/OSFI sanctions match found"], "severity": "Low"},
+                {"name": "Mike Lazaridis", "flags": ["Clean - PEP Screening Passed"], "severity": "Low"},
+            ],
+        }
+        result = ae._validate_sanctions_flag(parsed)
+        assert result["sanctions_match_flag"] is False
+
+    def test_true_flag_with_a_high_severity_person_is_kept(self):
+        parsed = {
+            "sanctions_match_flag": True,
+            "persons": [
+                {"name": "Jane Smith", "flags": ["OFAC SDN list match found"], "severity": "High"},
+            ],
+        }
+        result = ae._validate_sanctions_flag(parsed)
+        assert result["sanctions_match_flag"] is True
+
+    def test_true_flag_with_a_critical_severity_person_is_kept(self):
+        parsed = {
+            "sanctions_match_flag": True,
+            "persons": [{"name": "Jane Smith", "severity": "Critical"}],
+        }
+        result = ae._validate_sanctions_flag(parsed)
+        assert result["sanctions_match_flag"] is True
+
+    def test_missing_persons_key_is_cleared(self):
+        parsed = {"sanctions_match_flag": True}
+        result = ae._validate_sanctions_flag(parsed)
+        assert result["sanctions_match_flag"] is False
+
+    def test_non_list_persons_does_not_crash(self):
+        parsed = {"sanctions_match_flag": True, "persons": "not a list"}
+        result = ae._validate_sanctions_flag(parsed)
+        assert result["sanctions_match_flag"] is False
