@@ -15,8 +15,10 @@ Features:
 import os
 import re
 import time
+import threading
 import requests
 import ssl
+from difflib import SequenceMatcher
 from datetime import datetime
 from requests.adapters import HTTPAdapter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -36,6 +38,11 @@ _LOOKBACK_YEARS = max(1, config.LOOKBACK_MONTHS // 12)
 MIN_LOOKBACK_YEAR = _NOW.year - _LOOKBACK_YEARS
 
 _SERPER_CACHE = {}
+# collect_vendor_signals() runs all 5 dimensions concurrently in a
+# ThreadPoolExecutor, and each one calls _serper() — so this cache and the
+# search-status flag below are genuinely accessed from multiple threads at
+# once within a single vendor analysis, not just a theoretical concern.
+_CACHE_LOCK = threading.Lock()
 
 # Section 10.2 "Intelligence Run Failure Handling": a quota-exhausted or
 # misconfigured Serper key must not silently look identical to "searched and
@@ -43,22 +50,26 @@ _SERPER_CACHE = {}
 # which meant the whole platform could run on LLM narrative alone with no
 # report-visible indication that live search grounding was missing this run.
 _SEARCH_STATUS = {"available": True, "reason": ""}
+_STATUS_LOCK = threading.Lock()
 
 
 def _mark_unavailable(reason: str):
-    _SEARCH_STATUS["available"] = False
-    _SEARCH_STATUS["reason"] = reason
+    with _STATUS_LOCK:
+        _SEARCH_STATUS["available"] = False
+        _SEARCH_STATUS["reason"] = reason
     _safe_print(f"  [!] SEARCH GROUNDING UNAVAILABLE: {reason}")
 
 
 def _mark_available():
-    _SEARCH_STATUS["available"] = True
-    _SEARCH_STATUS["reason"] = ""
+    with _STATUS_LOCK:
+        _SEARCH_STATUS["available"] = True
+        _SEARCH_STATUS["reason"] = ""
 
 
 def search_grounding_status() -> dict:
     """Current Serper availability, as observed by the most recent call(s)."""
-    return dict(_SEARCH_STATUS)
+    with _STATUS_LOCK:
+        return dict(_SEARCH_STATUS)
 
 
 def _safe_print(msg: str):
@@ -87,8 +98,9 @@ def _serper(query: str, num: int = 5) -> list:
         return []
 
     query_key = f"{query.strip()}__num_{num}"
-    if query_key in _SERPER_CACHE:
-        return _SERPER_CACHE[query_key]
+    with _CACHE_LOCK:
+        if query_key in _SERPER_CACHE:
+            return _SERPER_CACHE[query_key]
 
     for attempt in range(3):
         try:
@@ -112,7 +124,8 @@ def _serper(query: str, num: int = 5) -> list:
                     }
                     for rc in r.json().get("organic", [])
                 ]
-                _SERPER_CACHE[query_key] = hits
+                with _CACHE_LOCK:
+                    _SERPER_CACHE[query_key] = hits
                 return hits
             elif r.status_code in (429, 500, 502, 503) and attempt < 2:
                 backoff = 2 ** attempt  # 1s, 2s
@@ -194,6 +207,23 @@ PROFILE_QUERIES = [
     '"{vendor}" corporate headquarters founder established employees',
 ]
 
+# Section 6.2.1/6.2.2: "Tier-1 sources (major newspapers, wire services)
+# carry higher weight than Tier-2 (blogs, forums)... Tier-1 outlets carry
+# higher weight than unverified online sources." Deliberately a short,
+# high-confidence list of major Canadian and international wire/newspaper
+# domains — not an attempt to classify every outlet, just to distinguish
+# "credible major outlet" from "everything else."
+TIER1_DOMAINS = {
+    "cbc.ca", "theglobeandmail.com", "nationalpost.com", "financialpost.com",
+    "globalnews.ca", "ctvnews.ca", "thestar.com", "reuters.com", "bloomberg.com",
+    "wsj.com", "nytimes.com", "apnews.com", "bbc.com", "canlii.org",
+}
+
+
+def _is_tier1(hit: dict) -> bool:
+    url = (hit.get("url") or "").lower()
+    return any(d in url for d in TIER1_DOMAINS)
+
 
 def _stale(r: dict) -> bool:
     """Enforces 36-month lookback window on risk incidents."""
@@ -203,6 +233,29 @@ def _stale(r: dict) -> bool:
     if not has_recent and any(str(yr) in txt for yr in range(2010, MIN_LOOKBACK_YEAR)):
         return True
     return False
+
+
+def _is_recent_12m(r: dict) -> bool:
+    """
+    Best-effort check for Section 11's recency_multiplier_12m ("signals from
+    the most recent 12 months carry Nx weight"). Serper's `date` field is an
+    inconsistent mix of relative ("3 weeks ago") and absolute strings, so
+    this is deliberately conservative — it only returns True on a fairly
+    confident match, never guesses on an ambiguous or missing date. Under-
+    counting is the safe failure direction here, not over-counting.
+    """
+    date_str = (r.get("date") or "").lower().strip()
+    if not date_str:
+        return False
+    m = re.match(r'(\d+)\s+(day|week|month)s?\s+ago', date_str)
+    if m:
+        n, unit = int(m.group(1)), m.group(2)
+        if unit == "day":
+            return True
+        if unit == "week":
+            return n <= 52
+        return n <= 12  # month
+    return str(CURRENT_YEAR) in date_str
 
 
 def _relevant(r: dict, vendor_variants: list) -> bool:
@@ -215,6 +268,22 @@ def _relevant(r: dict, vendor_variants: list) -> bool:
     return False
 
 
+def _is_duplicate_event(title: str, kept_hits: list, threshold: float = 0.78) -> bool:
+    """
+    Section 9.1: "where the same underlying event is reported by multiple
+    news sources, it shall be logged once." Exact-URL dedup (the `seen` set
+    in _search_category) only catches the same link twice — this catches
+    the far more common case of the same story run under near-identical
+    headlines by different outlets. difflib is stdlib, no new dependency;
+    threshold is deliberately conservative (0.78) so genuinely distinct
+    stories that merely share common words aren't merged.
+    """
+    if not title:
+        return False
+    t = title.lower()
+    return any(SequenceMatcher(None, t, (h.get("title") or "").lower()).ratio() >= threshold for h in kept_hits)
+
+
 def _block(hits: list) -> str:
     lines = []
     for i, h in enumerate(hits, 1):
@@ -223,7 +292,50 @@ def _block(hits: list) -> str:
     return "\n\n".join(lines)
 
 
-def _search_category(cat: str, templates: list, vendor_clean: str, vendor_variants: list, domain_hint: str):
+def _detect_french(text: str) -> bool:
+    """
+    Lightweight, dependency-free French-language detector (SK-VDD-001
+    Section 9.2: "French-language Canadian sources... where material risk
+    signals are identified in French-language media, NIVETA shall flag them
+    and provide a machine-translated summary"). Compares common French vs.
+    English function-word density — conservative on purpose, so a French
+    company name inside an otherwise-English snippet doesn't false-positive.
+    """
+    if not text or len(text) < 20:
+        return False
+    t = f" {text.lower()} "
+    french_markers = [" le ", " la ", " les ", " des ", " une ", " et ", " dans ", " pour ",
+                       " avec ", " est ", " sont ", " qui ", " que ", " du ", " au ", " aux ",
+                       " été ", " être ", " selon ", " entreprise ", " société "]
+    english_markers = [" the ", " and ", " for ", " with ", " is ", " are ", " that ",
+                        " of ", " to ", " in ", " on ", " company ", " was ", " were "]
+    fr_count = sum(t.count(m) for m in french_markers)
+    en_count = sum(t.count(m) for m in english_markers)
+    return fr_count >= 3 and fr_count > en_count * 1.5
+
+
+def _translate_french_hits(french_hits: list) -> str:
+    """Machine-translates flagged French-language hits via the same LLM
+    ladder already used elsewhere (financial_fetcher.py does the same lazy
+    cross-module import for the same reason: no circular import at module
+    load time, since ai_engine.py never imports scraper.py)."""
+    combined = "\n".join(f"- {h.get('title', '')}: {h.get('snippet', '')}" for h in french_hits[:5])
+    try:
+        from ai_engine import _groq as _ai_groq
+        prompt = (
+            "Translate the following French-language search results into English. "
+            "Return ONLY the translated text, one item per line.\n\n" + combined
+        )
+        translated = _ai_groq(prompt, max_tokens=300)
+        if translated:
+            return f"[FRENCH-LANGUAGE SOURCE(S) DETECTED — MACHINE-TRANSLATED SUMMARY]:\n{translated.strip()}"
+    except Exception:
+        pass
+    return f"[FRENCH-LANGUAGE SOURCE(S) DETECTED — {len(french_hits)} item(s), translation unavailable this run]:\n{combined}"
+
+
+def _search_category(cat: str, templates: list, vendor_clean: str, vendor_variants: list, domain_hint: str,
+                      extra_queries: list = None):
     hits, seen = [], set()
     for tmpl in templates:
         q = tmpl.replace("{vendor}", vendor_clean).replace("{years}", _YEARS_CLAUSE)
@@ -232,9 +344,41 @@ def _search_category(cat: str, templates: list, vendor_clean: str, vendor_varian
         for h in _serper(q, 5):
             if h["url"] in seen or _stale(h) or not _relevant(h, vendor_variants):
                 continue
+            if _is_duplicate_event(h.get("title", ""), hits):
+                continue
             seen.add(h["url"])
             hits.append(h)
-    return cat, {"text": _block(hits), "urls": [h["url"] for h in hits], "hit_count": len(hits)}
+
+    # Section 4.2 bilingual name resolution: a pre-built raw query (e.g. using
+    # the French-name variant), not templated with {vendor}/{years} since the
+    # caller already built the exact string.
+    for q in (extra_queries or []):
+        for h in _serper(q, 5):
+            if h["url"] in seen or _stale(h) or not _relevant(h, vendor_variants):
+                continue
+            if _is_duplicate_event(h.get("title", ""), hits):
+                continue
+            seen.add(h["url"])
+            hits.append(h)
+
+    recent_count = sum(1 for h in hits if _is_recent_12m(h))
+    tier1_count = sum(1 for h in hits if _is_tier1(h))
+    french_hits = [h for h in hits if _detect_french(f"{h.get('title', '')} {h.get('snippet', '')}")]
+
+    text_block = _block(hits)
+    if french_hits:
+        translated_note = _translate_french_hits(french_hits)
+        text_block = f"{text_block}\n\n{translated_note}" if text_block else translated_note
+
+    return cat, {
+        "text": text_block, "urls": [h["url"] for h in hits], "hit_count": len(hits),
+        "recent_hit_count": recent_count, "french_hit_count": len(french_hits),
+        "tier1_hit_count": tier1_count,
+        # Section 9.1: "NIVETA shall record the retrieval timestamp for each
+        # source query" — when THIS search ran, distinct from each article's
+        # own published date (already captured per-hit).
+        "retrieved_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
 
 
 def _search_profile(vendor_clean: str, vendor_variants: list, domain_hint: str, naics_code: str = "", duns_number: str = ""):
@@ -270,14 +414,25 @@ def collect_vendor_signals(vendor: str, industry: str = "", country: str = "Cana
     norm = normalize_vendor_name(vendor)
     vendor_clean = norm["normalized_name"]
     vendor_variants = norm["variants"]
+    french_variant = norm.get("french_variant")
     domain_hint = extract_domain(company_url)
 
     _safe_print(f"  [+] SK-VDD-001 Intelligence Sweep: {vendor_clean} (Raw: {vendor}) | Scope: {country}")
     context = {}
 
+    # Section 4.2: search under the French-language name too, for the two
+    # dimensions where French-language Canadian coverage is most likely to
+    # exist (Quebec/national media, and federal regulator French-language
+    # notices) — not all 5, since e.g. a cyber CVE search gains nothing from
+    # a French name variant.
+    french_extra = {}
+    if french_variant:
+        french_extra["reputation"] = [f'"{french_variant}" (controverse OR poursuite OR scandale OR amende) {_YEARS_CLAUSE}']
+        french_extra["compliance"] = [f'"{french_variant}" (OSFI OR CANAFE OR sanction OR amende OR conformité) {_YEARS_CLAUSE}']
+
     with ThreadPoolExecutor(max_workers=6) as ex:
         cat_futures = {
-            ex.submit(_search_category, cat, tmpl, vendor_clean, vendor_variants, domain_hint): cat
+            ex.submit(_search_category, cat, tmpl, vendor_clean, vendor_variants, domain_hint, french_extra.get(cat)): cat
             for cat, tmpl in SEARCH_QUERIES.items()
         }
         prof_future = ex.submit(_search_profile, vendor_clean, vendor_variants, domain_hint, naics_code, duns_number)

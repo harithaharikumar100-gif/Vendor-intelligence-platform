@@ -142,7 +142,7 @@ def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada"
             ff = ex.submit(_finance)
             rf = ex.submit(_registry)
             data = sf.result()
-            financial_metrics, prof_extras = ff.result()
+            financial_metrics, prof_extras, prof_sources = ff.result()
             registry_data = rf.result()
 
         if not isinstance(data, dict):
@@ -220,13 +220,28 @@ def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada"
         if not isinstance(cp, dict):
             cp = {}
 
+        # field_sources tags each profile field with how confident its value
+        # is: "yfinance"/"wikidata" are structured, deterministic sources;
+        # "wikipedia_extract"/"web_scrape" are regex matches on real text;
+        # "llm_estimate" means no matching text was found anywhere and the
+        # value came from an LLM recalling it from training knowledge (or
+        # ai_engine.py's own free-text profile synthesis below) rather than
+        # from a verifiable source - the two are visually indistinguishable
+        # otherwise, which is exactly what let a wrong LLM guess (e.g. CN
+        # Rail's founding year) sit next to verified facts with equal
+        # apparent confidence.
+        cp["field_sources"] = {}
         INVALID = {"", "not available", "unknown", "n/a", "none", "null", "undefined"}
         for field in ("ceo", "founder", "founded", "headquarters", "employees"):
             scraped_val = str(prof_extras.get(field, "")).strip()
             if scraped_val and scraped_val.lower() not in INVALID:
                 cp[field] = scraped_val
+                cp["field_sources"][field] = prof_sources.get(field, "web_scrape")
             elif str(cp.get(field, "")).strip().lower() in INVALID:
                 cp[field] = "Not Available"
+                cp["field_sources"][field] = "not_available"
+            else:
+                cp["field_sources"][field] = "llm_estimate"
 
         if financial_metrics:
             cp["financial_metrics"] = {
@@ -280,9 +295,7 @@ def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada"
             result["disambiguation_flag"] = False
 
         result["overall_score"] = overall
-        result["overall_risk_score"] = overall
         result["overall_risk_rating"] = tier_name
-        result["risk_level"] = tier_name
         result["traffic_light"] = tier_meta["traffic_light"]
         result["recommended_action"] = tier_meta["action"]
         result["automatic_escalations"] = escalations
@@ -356,6 +369,25 @@ def get_vendor_analysis(vendor: str, industry: str = "", country: str = "Canada"
                 f"risk factors below are LLM-knowledge and deterministic-rule-engine best-effort only, "
                 f"NOT verified against live public search results (Section 10.2)."
             )
+
+        # Section 9.2: French-language sources must be explicitly flagged,
+        # not silently mixed into English-only synthesis with no record
+        # that a translation happened.
+        total_french_hits = sum(data.get(c, {}).get("french_hit_count", 0) for c in RISK_CATEGORIES)
+        if total_french_hits > 0:
+            result.setdefault("data_gaps", [])
+            result["data_gaps"].append(
+                f"{total_french_hits} French-language source(s) detected across evidence for this vendor — "
+                f"flagged and machine-translated per Section 9.2; see the affected dimension's evidence text "
+                f"for the translated summary."
+            )
+
+        # Section 9.1: "NIVETA shall record the retrieval timestamp for each
+        # source query" — when each dimension's search actually ran, not to
+        # be confused with the recency of the events those sources report on.
+        result["retrieval_timestamps"] = {
+            c: data.get(c, {}).get("retrieved_at") for c in RISK_CATEGORIES if data.get(c, {}).get("retrieved_at")
+        }
 
         # SK-VDD-001 Section 3.3 step 2 (Jurisdiction Confirmation) + Section 10.2
         # (Intelligence Run Failure Handling), unified into one jurisdiction gate.

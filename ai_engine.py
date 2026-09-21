@@ -13,6 +13,7 @@ import json
 import re
 import time
 import random
+import threading
 import requests
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -37,6 +38,13 @@ _MATERIAL_WEAKNESS_PATTERNS = [
     r"material weakness in internal control",
 ]
 
+# Section 6.1.1: "identify any dissolution notices or receivership filings."
+# Same deterministic-not-LLM-discretion treatment as going-concern above.
+_DISSOLUTION_PATTERNS = [
+    r"\bdissolv\w*\b", r"\bstruck\b", r"\breceivership\b", r"\bin receiver\w*\b",
+    r"\bwound[\s-]up\b", r"\bwinding[\s-]up\b", r"\bceased to exist\b",
+]
+
 
 def _detect_financial_red_flags(evidence_text: str) -> dict:
     """Section 6.1.2 Audit signals: deterministic keyword scan, not LLM discretion."""
@@ -45,6 +53,22 @@ def _detect_financial_red_flags(evidence_text: str) -> dict:
         "going_concern": any(re.search(p, text) for p in _GOING_CONCERN_PATTERNS),
         "material_weakness": any(re.search(p, text) for p in _MATERIAL_WEAKNESS_PATTERNS),
     }
+
+
+def _detect_dissolution_status(evidence_text: str) -> bool:
+    """
+    Section 6.1.1: "confirm active good standing, identify any dissolution
+    notices or receivership filings." A false positive here is as serious a
+    claim as a false sanctions match, so this reuses the negation-aware
+    matching already proven in frameworks.py — "no dissolution notices were
+    found" must not be misread as a dissolution finding.
+    """
+    text = (evidence_text or "").lower()
+    for p in _DISSOLUTION_PATTERNS:
+        m = re.search(p, text)
+        if m and not frameworks._is_negated(text, m.start()):
+            return True
+    return False
 
 PREFERRED_MODELS = [
     "qwen/qwen3.8-27b",
@@ -60,6 +84,9 @@ PREFERRED_MODELS = [
 RISK_CATEGORIES = ["financial", "reputation", "key_person", "cyber", "compliance"]
 
 _DISCOVERED_MODELS = []
+# Concurrent /api/analyze requests run analyze_vendor_full on different
+# threadpool threads, and each can reach _call_groq -> mutate this list.
+_MODELS_LOCK = threading.Lock()
 
 
 def _safe_log(msg: str):
@@ -150,17 +177,27 @@ def _call_groq(prompt: str, max_tokens: int = 400, model_hint: str = None) -> st
         return ""
     try:
         from groq import Groq
-        client = Groq(api_key=key)
+        # Gemini (timeout=15) and OpenAI (timeout=12) below both bound their
+        # request time; this client had none, so an SDK-default-timeout or
+        # a plain stalled connection here blocked the ENTIRE analysis
+        # indefinitely instead of failing over to the next model/provider
+        # (confirmed live: a request hung for 15+ minutes with zero log
+        # output mid-way through Phase 2, versus every other observed call
+        # in this codebase resolving in 1-3s). 20s keeps us well under the
+        # 2-attempt-per-model retry budget while still failing fast enough
+        # to move on to the next of ~6 models.
+        client = Groq(api_key=key, timeout=20)
     except Exception:
         return ""
 
     global _DISCOVERED_MODELS
-    if not _DISCOVERED_MODELS:
-        try:
-            avail = [m.id for m in client.models.list().data if not any(k in m.id for k in ["whisper", "guard", "orpheus"])]
-            _DISCOVERED_MODELS = [m for m in PREFERRED_MODELS if m in avail] + [m for m in avail if m not in PREFERRED_MODELS]
-        except Exception:
-            _DISCOVERED_MODELS = PREFERRED_MODELS
+    with _MODELS_LOCK:
+        if not _DISCOVERED_MODELS:
+            try:
+                avail = [m.id for m in client.models.list().data if not any(k in m.id for k in ["whisper", "guard", "orpheus"])]
+                _DISCOVERED_MODELS = [m for m in PREFERRED_MODELS if m in avail] + [m for m in avail if m not in PREFERRED_MODELS]
+            except Exception:
+                _DISCOVERED_MODELS = PREFERRED_MODELS
 
     models = [model_hint] + [m for m in _DISCOVERED_MODELS if m != model_hint] if model_hint else _DISCOVERED_MODELS
 
@@ -288,7 +325,7 @@ signals as distinct items wherever evidence or verified financial data supports 
 
 Return ONLY valid JSON:
 {{
-  "score": <0-100>,
+  "score": <0-100 FINANCIAL RISK score, not a health/strength score: 0 means no financial risk found, 100 means severe/critical financial risk. A LOW score is GOOD (financially strong); a HIGH score is BAD (financially weak).>,
   "signals": [{{"category": "<Solvency|Liquidity|Profitability|Leverage|Audit|Growth>", "indicator": "<one complete, specific risk factor statement>", "severity": "<Low|Elevated|High|Critical>"}}],
   "summary": "<2-3 sentences assessing balance sheet, leverage, and going-concern status>",
   "going_concern_flag": <true|false>,
@@ -310,7 +347,7 @@ finding, not a summary of several combined.
 
 Return ONLY valid JSON:
 {{
-  "score": <0-100>,
+  "score": <0-100 REPUTATIONAL RISK score, not a reputation-health score: 0 means no adverse media/controversy found, 100 means severe/critical reputational risk. A LOW score is GOOD (clean reputation); a HIGH score is BAD (damaged reputation).>,
   "articles": [{{"headline": "<one specific issue, naming what actually happened>", "source": "<source>", "date": "Recent", "severity": "<Low|Elevated|High|Critical>", "url": ""}}],
   "summary": "<2-3 sentences assessing controversies and litigation history>",
   "evidence_urls": {json.dumps(urls[:3])}
@@ -335,7 +372,7 @@ specific, standalone flags — not a generic "Clean" for everyone unless genuine
 
 Return ONLY valid JSON:
 {{
-  "score": <0-100>,
+  "score": <0-100 KEY-PERSON RISK score, not a leadership-strength score: 0 means no sanctions/governance/key-person risk found, 100 means severe/critical key-person risk. A LOW score is GOOD (stable, clean leadership); a HIGH score is BAD (sanctions hit or governance concern).>,
   "persons": [{{"name": "<executive name>", "role": "<title>", "tenure": "<tenure>", "flags": ["<specific finding, e.g. 'No OFAC/OSFI sanctions match found' or the actual concern>"], "severity": "<Low|Elevated|High|Critical>"}}],
   "sanctions_match_flag": <true|false>,
   "concentration_risk": "<Low|Elevated|High>",
@@ -358,7 +395,7 @@ posture as distinct items.
 
 Return ONLY valid JSON:
 {{
-  "score": <0-100>,
+  "score": <0-100 CYBER RISK score, not a security-posture score: 0 means no breach/CVE/advisory exposure found, 100 means severe/critical cyber risk. A LOW score is GOOD (clean cyber posture); a HIGH score is BAD (breach or critical exposure).>,
   "signals": [{{"category": "<Data Breach|CVE Exposure|Government Advisory|Ransomware|Cyber Hygiene>", "indicator": "<one complete, specific risk factor statement>", "severity": "<Low|Elevated|High|Critical>"}}],
   "recent_breach_flag": <true|false>,
   "summary": "<2-3 sentences on breach history and cyber defense posture>",
@@ -380,7 +417,7 @@ CRTC/CASL, Competition Bureau) — one item per regulator with what was actually
 
 Return ONLY valid JSON:
 {{
-  "score": <0-100>,
+  "score": <0-100 COMPLIANCE RISK score, not a compliance-health score: 0 means no regulatory penalties/orders found, 100 means severe/critical compliance risk. A LOW score is GOOD (clean regulatory record); a HIGH score is BAD (active penalties or orders).>,
   "signals": [{{"authority": "<Regulator>", "action": "<one complete, specific finding for this regulator>", "material": <true if penalty exceeds CAD 100,000 else false>, "severity": "<Low|Elevated|High|Critical>"}}],
   "prohibition_order_flag": <true|false>,
   "summary": "<2-3 sentences on regulatory enforcement history>",
@@ -404,9 +441,15 @@ Return ONLY valid JSON:
 
 
 def _synthesis_prompt(vendor, industry, country, cat_results, concerns, total_hits):
-    lines = [f"- {cat.upper()} (Score: {r.get('score', 25)}/100): {r.get('summary', '')[:90]}" for cat, r in cat_results.items()]
+    lines = [f"- {cat.upper()} (Risk Score: {r.get('score', 25)}/100): {r.get('summary', '')[:90]}" for cat, r in cat_results.items()]
     assessments_block = "\n".join(lines)
     return f"""Executive Risk Committee. Synthesize due diligence for {vendor} ({industry}, {country}) per SK-VDD-001.
+
+IMPORTANT - score direction: every score below is a RISK score, not a health/strength score.
+0 = no risk found (GOOD). 100 = severe/critical risk (BAD). A LOW score is the desirable outcome in
+every dimension. Do not describe a high score as "strength" or "stability", and do not describe a
+low score as a "deficiency" or "concern" - get the polarity right in analyst_notes.
+
 ASSESSMENTS:
 {assessments_block}
 CONCERNS: {concerns or 'Standard Vendor Due Diligence'}
@@ -822,7 +865,49 @@ def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns=""
             "severity": "High",
         })
         _fin["score"] = max(int(_fin.get("score", 25)), 65)
+    if _detect_dissolution_status(_fin_evidence):
+        _fin["dissolution_flag"] = True
+        _fin["score"] = max(int(_fin.get("score", 25)), 90)
+        _fin.setdefault("signals", []).append({
+            "category": "Solvency", "indicator": "Dissolution notice or receivership filing referenced in sourced registry/evidence text — entity may no longer be in active good standing.",
+            "severity": "Critical",
+        })
     cat_results["financial"] = _fin
+
+    # 3a-i-b. Recency Multiplier (SK-VDD-001 Section 6.2.2 / Section 11
+    # recency_multiplier_12m): "articles within the last 12 months carry Nx
+    # weight versus articles from 13-36 months ago." The LLM/fallback engine
+    # assigns one holistic score per dimension rather than summing per-article
+    # points, so there's no clean per-article weight to multiply — instead
+    # this applies a bounded nudge proportional to how much of the real
+    # adverse-media evidence this run actually found is recent (<=12mo).
+    # Dampened (0.25 factor) so it adjusts, not dominates, a score the
+    # LLM/fallback already computed with severity in mind; only fires when
+    # there's real recent-hit data to act on, never fabricated.
+    _rep = cat_results.get("reputation", {})
+    _rep_hits = data.get("reputation", {}).get("hit_count", 0)
+    _rep_recent = data.get("reputation", {}).get("recent_hit_count", 0)
+    if _rep_hits > 0 and _rep_recent > 0:
+        _recent_ratio = _rep_recent / _rep_hits
+        _base_rep_score = int(_rep.get("score", 25))
+        _adjusted = min(100, _base_rep_score * (1 + (config.RECENCY_MULTIPLIER_12M - 1) * _recent_ratio * 0.25))
+        _rep["score"] = int(round(_adjusted))
+
+    # 3a-i-c. Tier-1 Source Credibility (SK-VDD-001 Section 6.2.1/6.2.2):
+    # "Tier-1 sources... carry higher weight than Tier-2 (blogs, forums)."
+    # Same bounded-nudge pattern as recency above, and for the same reason —
+    # there's no config-defined multiplier for this one (unlike
+    # recency_multiplier_12m), so a smaller fixed dampening factor (0.15) is
+    # used, deliberately gentler since "more credible" isn't as strong a
+    # signal as "more recent" for how much a score should move.
+    _rep_tier1 = data.get("reputation", {}).get("tier1_hit_count", 0)
+    if _rep_hits > 0 and _rep_tier1 > 0:
+        _tier1_ratio = _rep_tier1 / _rep_hits
+        _base_rep_score2 = int(_rep.get("score", 25))
+        _adjusted2 = min(100, _base_rep_score2 * (1 + _tier1_ratio * 0.15))
+        _rep["score"] = int(round(_adjusted2))
+
+    cat_results["reputation"] = _rep
 
     # 3a-ii. Real Cyber Intelligence (NVD CVE database + CISA KEV catalogue,
     # both free/no-key; HIBP domain breach search if HIBP_API_KEY configured).
@@ -980,6 +1065,7 @@ def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns=""
         sources_used.append(f"yfinance — live financial ratios ({financial_metrics.get('ticker', 'ticker')})")
     sources_used.append("NVD (nvd.nist.gov) REST API — CVE records")
     sources_used.append("CISA Known Exploited Vulnerabilities Catalogue")
+    sources_used.append("CCCS (cyber.gc.ca) Alerts & Advisories Feed")
     sources_used.append("OFAC SDN Sanctions List (sanctionslistservice.ofac.treas.gov)")
     if _real_cyber.get("hibp_queried"):
         sources_used.append("HaveIBeenPwned Domain Search API")
@@ -1030,6 +1116,32 @@ def analyze_vendor_full(vendor, data, country="Canada", industry="", concerns=""
         "key_person": frameworks.assess_all("key_person", _kp_corpus),
         "compliance": frameworks.assess_all("compliance", _comp_corpus),
     }
+
+    def _attach_sources(items, urls):
+        """
+        Section 9.1: "every signal extracted must carry a source citation."
+        We don't have a reliable one-signal-to-one-URL mapping — the LLM and
+        the deterministic engine don't tag which specific claim came from
+        which specific link — so this attaches the full set of URLs actually
+        consulted for that dimension this run. Honest about what it is: "the
+        sources behind this dimension's findings," not a fabricated precise
+        per-claim match. Signals that already carry their own real per-item
+        source (e.g. cyber_intel's NVD/CISA entries use "source"/"url") are
+        left alone — this only fills in where nothing exists yet.
+        """
+        for item in items or []:
+            if isinstance(item, dict) and "sources" not in item and "url" not in item:
+                item["sources"] = urls or []
+        return items
+
+    # By this point cat_results[cat] has already been backfilled from the
+    # autonomous engine (see the completeness passes above), so mutating it
+    # in place here is what actually reaches the response below.
+    for _cat in RISK_CATEGORIES:
+        _urls = cat_results.get(_cat, {}).get("evidence_urls", [])
+        for _key in ("signals", "articles", "persons"):
+            if _key in cat_results.get(_cat, {}):
+                _attach_sources(cat_results[_cat][_key], _urls)
 
     return {
         "company_profile": company_profile,

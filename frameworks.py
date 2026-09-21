@@ -120,6 +120,88 @@ FRAMEWORKS = {
             },
         ],
     },
+    "fintrac_guidance": {
+        "id": "fintrac_guidance",
+        "name": "FINTRAC Guidance (AML/ATF Compliance Program)",
+        "authority": "Financial Transactions and Reports Analysis Centre of Canada",
+        "dimension": "compliance",
+        "principles": [
+            {
+                "id": "compliance_officer_appointed",
+                "title": "A designated AML/ATF compliance officer is identifiable",
+                "polarity": "positive",
+                "keywords": ["compliance officer", "aml officer", "anti-money laundering officer"],
+            },
+            {
+                "id": "written_compliance_program",
+                "title": "Written AML/ATF compliance policies and procedures are disclosed",
+                "polarity": "positive",
+                "keywords": ["compliance policy", "compliance procedures", "aml program", "aml/atf program"],
+            },
+            {
+                "id": "risk_assessment",
+                "title": "A documented business-wide money-laundering/terrorist-financing risk assessment exists",
+                "polarity": "positive",
+                "keywords": ["risk assessment", "money laundering risk", "terrorist financing risk"],
+            },
+            {
+                "id": "compliance_training",
+                "title": "An ongoing AML/ATF compliance training program is disclosed",
+                "polarity": "positive",
+                "keywords": ["compliance training", "aml training", "staff training program"],
+            },
+            {
+                "id": "effectiveness_review",
+                "title": "A periodic independent effectiveness review of the compliance program is disclosed",
+                "polarity": "positive",
+                "keywords": ["effectiveness review", "compliance audit", "independent review of compliance"],
+            },
+            {
+                "id": "amp_history",
+                "title": "No FINTRAC administrative monetary penalty (AMP) on record",
+                "polarity": "adverse",
+                "keywords": ["fintrac penalty", "administrative monetary penalty", "amp from fintrac", "fintrac fine"],
+            },
+        ],
+    },
+    "opc_pipeda_guidelines": {
+        "id": "opc_pipeda_guidelines",
+        "name": "OPC Guidelines (PIPEDA Privacy Program)",
+        "authority": "Office of the Privacy Commissioner of Canada",
+        "dimension": "compliance",
+        "principles": [
+            {
+                "id": "accountability",
+                "title": "A designated privacy officer or accountable individual for personal information is identifiable",
+                "polarity": "positive",
+                "keywords": ["privacy officer", "chief privacy officer", "data protection officer"],
+            },
+            {
+                "id": "breach_notification_process",
+                "title": "A documented breach notification / incident-response process for personal information is disclosed",
+                "polarity": "positive",
+                "keywords": ["breach notification", "incident response plan", "privacy breach protocol"],
+            },
+            {
+                "id": "public_privacy_policy",
+                "title": "A publicly available privacy policy governing personal information is disclosed",
+                "polarity": "positive",
+                "keywords": ["privacy policy", "privacy notice"],
+            },
+            {
+                "id": "safeguards",
+                "title": "Documented technical/organizational safeguards for personal information are disclosed",
+                "polarity": "positive",
+                "keywords": ["data safeguards", "security safeguards", "information safeguards"],
+            },
+            {
+                "id": "pipeda_finding_history",
+                "title": "No OPC finding of PIPEDA contravention on record",
+                "polarity": "adverse",
+                "keywords": ["pipeda violation", "opc finding", "privacy commissioner investigation", "found in contravention"],
+            },
+        ],
+    },
 }
 
 

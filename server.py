@@ -13,7 +13,8 @@ import os
 import io
 import json
 import time
-from fastapi import FastAPI, HTTPException, Response
+import threading
+from fastapi import FastAPI, HTTPException, Response, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -42,17 +43,48 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Enable CORS for local React development
+# CORS: locked to config.ALLOWED_ORIGINS (default: local dev origins only).
+# The previous allow_origins=["*"] combined with allow_credentials=True was
+# already an invalid combination browsers reject outright, so no genuine
+# credentialed cross-origin request was ever actually working under it.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=config.ALLOWED_ORIGINS,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# In-memory analysis cache
+# In-memory analysis cache. FastAPI runs sync endpoints in a threadpool, so
+# even a single uvicorn worker can hit this dict from multiple threads at
+# once — the lock protects against a read/evict/write race, not against
+# multi-process deployment (a real DB/cache would be needed for that).
 ANALYSIS_CACHE = {}
+_CACHE_LOCK = threading.Lock()
+
+# Per-IP sliding-window rate limit on the expensive endpoint (see config.py).
+_RATE_LIMIT_HITS: Dict[str, list] = {}
+_RATE_LIMIT_LOCK = threading.Lock()
+
+
+def _check_rate_limit(client_ip: str):
+    now = time.time()
+    with _RATE_LIMIT_LOCK:
+        hits = [t for t in _RATE_LIMIT_HITS.get(client_ip, []) if now - t < config.RATE_LIMIT_WINDOW_SECONDS]
+        if len(hits) >= config.RATE_LIMIT_MAX_REQUESTS:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Rate limit exceeded: max {config.RATE_LIMIT_MAX_REQUESTS} requests per "
+                       f"{config.RATE_LIMIT_WINDOW_SECONDS}s. Try again shortly."
+            )
+        hits.append(now)
+        _RATE_LIMIT_HITS[client_ip] = hits
+
+
+def require_api_key(x_api_key: str = Header(default="")):
+    """No-op when config.API_KEY is unset (default local-dev behavior)."""
+    if config.API_KEY and x_api_key != config.API_KEY:
+        raise HTTPException(status_code=401, detail="Missing or invalid X-API-Key header.")
 
 # Pre-configured enterprise targets (Canadian & Global)
 PRESETS = [
@@ -133,7 +165,14 @@ PRESETS = [
 
 class AnalyzeRequest(BaseModel):
     vendor: str
-    industry: Optional[str] = "Technology & SaaS"
+    # Section 4.1: "NIVETA shall not assume any additional context beyond
+    # what is explicitly provided." Defaulting to a specific named industry
+    # (the old default was "Technology & SaaS") isn't just cosmetically
+    # wrong for a non-tech vendor — it also feeds ai_engine.py's cyber-score
+    # heuristic, silently inflating an unrelated company's baseline cyber
+    # risk score. Empty here lets services.py/ai_engine.py's existing
+    # neutral fallback ("General Commercial Services") actually apply.
+    industry: Optional[str] = ""
     country: Optional[str] = "Canada"
     concerns: Optional[str] = ""
     company_url: Optional[str] = ""
@@ -173,30 +212,33 @@ def normalize_input(data: Dict[str, str]):
     return normalize_vendor_name(vendor)
 
 
-@app.post("/api/analyze")
-def analyze_vendor(req: AnalyzeRequest):
+@app.post("/api/analyze", dependencies=[Depends(require_api_key)])
+def analyze_vendor(req: AnalyzeRequest, request: Request):
     if not req.vendor or not req.vendor.strip():
         raise HTTPException(status_code=400, detail="Vendor name is required.")
+
+    _check_rate_limit(request.client.host if request.client else "unknown")
 
     norm = normalize_vendor_name(req.vendor)
     clean_name = norm["normalized_name"]
 
     cache_key = f"{clean_name}__{req.country}__{req.industry}__{req.ticker}__{req.company_url}__{req.duns_number}__{req.naics_code}"
-    cached = ANALYSIS_CACHE.get(cache_key)
-    if cached:
-        age = time.time() - cached["cached_at"]
-        if age < config.CACHE_TTL_SECONDS:
-            _safe_print(f"[cache] Returning cached analysis for: {clean_name} (age {int(age)}s)")
-            return cached["result"]
-        # Section 2.1: periodic / event-triggered reviews require the cache
-        # to actually expire, otherwise a new adverse event would never be
-        # reflected. Evict and fall through to a fresh run.
-        _safe_print(f"[cache] Expired for: {clean_name} (age {int(age)}s >= TTL {config.CACHE_TTL_SECONDS}s) - re-running")
-        del ANALYSIS_CACHE[cache_key]
+    with _CACHE_LOCK:
+        cached = ANALYSIS_CACHE.get(cache_key)
+        if cached:
+            age = time.time() - cached["cached_at"]
+            if age < config.CACHE_TTL_SECONDS:
+                _safe_print(f"[cache] Returning cached analysis for: {clean_name} (age {int(age)}s)")
+                return cached["result"]
+            # Section 2.1: periodic / event-triggered reviews require the cache
+            # to actually expire, otherwise a new adverse event would never be
+            # reflected. Evict and fall through to a fresh run.
+            _safe_print(f"[cache] Expired for: {clean_name} (age {int(age)}s >= TTL {config.CACHE_TTL_SECONDS}s) - re-running")
+            del ANALYSIS_CACHE[cache_key]
 
     result, raw_signals = get_vendor_analysis(
         vendor=clean_name,
-        industry=req.industry or "Technology & SaaS",
+        industry=req.industry or "",
         country=req.country or "Canada",
         concerns=req.concerns or "",
         company_url=req.company_url or "",
@@ -209,28 +251,62 @@ def analyze_vendor(req: AnalyzeRequest):
     if "error" in result and not result.get("risk_scores"):
         raise HTTPException(status_code=500, detail=result["error"])
 
-    ANALYSIS_CACHE[cache_key] = {"result": result, "cached_at": time.time()}
+    cache_entry = {"result": result, "cached_at": time.time()}
+
+    # Section 11 auto_generate_pdf_report: previously defined but not wired to
+    # any behavior. Generating it eagerly here (instead of only on-demand in
+    # /api/download-pdf) both honors the flag and means the later download
+    # call can serve these bytes straight from cache instead of re-rendering.
+    if config.AUTO_GENERATE_PDF_REPORT:
+        try:
+            _tmp_path = os.path.join(os.getcwd(), f"_autogen_{cache_key.__hash__() & 0xffffffff}.pdf")
+            generate_pdf(result, filename=_tmp_path, vendor_name=clean_name)
+            with open(_tmp_path, "rb") as f:
+                cache_entry["pdf_bytes"] = f.read()
+            os.remove(_tmp_path)
+        except Exception as e:
+            _safe_print(f"[!] Auto-PDF generation failed for {clean_name}: {e}")
+
+    with _CACHE_LOCK:
+        ANALYSIS_CACHE[cache_key] = cache_entry
     return result
 
 
-@app.post("/api/download-pdf")
+def _find_cached_pdf(result: dict):
+    """Match an incoming /api/download-pdf result back to an analysis cache
+    entry by (vendor_name, query_date) to reuse an eagerly-generated PDF
+    instead of re-rendering one that already exists."""
+    vendor_name = result.get("vendor_name")
+    query_date = result.get("query_date")
+    if not vendor_name or not query_date:
+        return None
+    with _CACHE_LOCK:
+        for entry in ANALYSIS_CACHE.values():
+            cached_result = entry.get("result", {})
+            if (cached_result.get("vendor_name") == vendor_name
+                    and cached_result.get("query_date") == query_date
+                    and entry.get("pdf_bytes")):
+                return entry["pdf_bytes"]
+    return None
+
+
+@app.post("/api/download-pdf", dependencies=[Depends(require_api_key)])
 def download_pdf(req: PdfRequest):
     try:
         vendor_name = req.vendor_name or req.result.get("vendor_name", "vendor")
         clean_filename = f"DRiskify_SK_VDD_001_{vendor_name.lower().replace(' ', '_')}.pdf"
-        temp_pdf_path = os.path.join(os.getcwd(), clean_filename)
 
-        generate_pdf(req.result, filename=temp_pdf_path, vendor_name=vendor_name)
-
-        with open(temp_pdf_path, "rb") as f:
-            pdf_bytes = f.read()
-
-        # Clean up temporary file
-        if os.path.exists(temp_pdf_path):
-            try:
-                os.remove(temp_pdf_path)
-            except Exception:
-                pass
+        pdf_bytes = _find_cached_pdf(req.result)
+        if pdf_bytes is None:
+            temp_pdf_path = os.path.join(os.getcwd(), clean_filename)
+            generate_pdf(req.result, filename=temp_pdf_path, vendor_name=vendor_name)
+            with open(temp_pdf_path, "rb") as f:
+                pdf_bytes = f.read()
+            if os.path.exists(temp_pdf_path):
+                try:
+                    os.remove(temp_pdf_path)
+                except Exception:
+                    pass
 
         return Response(
             content=pdf_bytes,

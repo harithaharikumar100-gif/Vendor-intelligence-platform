@@ -289,10 +289,19 @@ def _yfinance(ticker: str) -> dict:
             _safe_print(f"  [•] yfinance returned sparse data, attempting web fallback for {ticker}")
             return {}
 
+        # yfinance's debtToEquity is reported as a PERCENTAGE (Yahoo Finance's
+        # own convention — e.g. 70.9 means 70.9%, a true ratio of 0.71x), not
+        # a raw multiple. Confirmed by reconciling the numbers directly: for
+        # a real vendor, treating the raw value as a multiple implied total
+        # equity ~100x too small (price-to-book in the hundreds), which is
+        # only realistic once divided by 100. This fed the deterministic
+        # "D/E > 3.0x -> High leverage" check in ai_engine.py directly, so
+        # the bug wasn't just cosmetic — it was silently inflating leverage
+        # risk for every vendor with a resolvable ticker.
         de = _fmt(info.get("debtToEquity"), "f")
         if de:
             try:
-                de = f"{float(de):.2f}x"
+                de = f"{float(de) / 100:.2f}x"
             except Exception:
                 pass
 
@@ -388,13 +397,18 @@ def _yfinance(ticker: str) -> dict:
 
 # ─── Wikipedia REST API Financial Enrichment (works on Render, no IP block) ───
 
-def _wikipedia_financials(vendor: str) -> dict:
+def _wikipedia_financials(vendor: str) -> tuple[dict, dict]:
     """
     Pull structured corporate data from Wikipedia REST summary + infobox API.
-    Returns a partial dict with any fields found: employees, revenue, headquarters,
-    founded, founder. Does NOT throw — always safe to call.
+    Returns (values, sources): a partial dict with any fields found (employees,
+    revenue, headquarters, founded, founder), and a companion dict tagging how
+    confident each one is — "wikidata" for a structured property (deterministic),
+    "wikipedia_extract" for a regex match on the lead-paragraph text (real
+    text, but not always present or unambiguous). Does NOT throw — always safe
+    to call.
     """
     out = {}
+    src = {}
     try:
         slug = vendor.strip().replace(" ", "_")
         r = requests.get(
@@ -423,6 +437,7 @@ def _wikipedia_financials(vendor: str) -> dict:
                     emp_int = int(emp_str)
                     if 10 <= emp_int <= 5_000_000:
                         out["employees"] = f"{emp_int:,}"
+                        src["employees"] = "wikipedia_extract"
                 except Exception:
                     pass
 
@@ -443,6 +458,7 @@ def _wikipedia_financials(vendor: str) -> dict:
                             out["revenue"] = f"${val:.2f}B"
                         else:
                             out["revenue"] = f"${val:.0f}M"
+                        src["revenue"] = "wikipedia_extract"
                         break
                     except Exception:
                         pass
@@ -457,12 +473,44 @@ def _wikipedia_financials(vendor: str) -> dict:
                     hq_val = m.group(1).strip().rstrip(",")
                     if 3 < len(hq_val) < 60 and "http" not in hq_val.lower():
                         out["headquarters"] = hq_val
+                        src["headquarters"] = "wikipedia_extract"
                         break
 
-            # Founded year
-            m = re.search(r'(?:founded|established|incorporated)[^0-9]*((?:18|19|20)\d{2})', tl)
-            if m:
-                out["founded"] = m.group(1)
+            # Founded year: the REST summary's "extract" is just the lead
+            # paragraph, which frequently never states a founding year at all
+            # (confirmed live: CN Rail's real extract text has none) — when
+            # that regex misses, the pipeline previously fell through to an
+            # LLM free-recall guess, which is exactly what produced two
+            # different answers (1919, then 1922 - only one correct) across
+            # two otherwise-identical runs. Wikidata's P571 ("inception")
+            # property is structured and deterministic, so it's tried first
+            # via the Wikidata item id this same summary response already
+            # returns, before ever falling back to the regex/LLM path.
+            qid = d.get("wikibase_item", "")
+            if qid:
+                try:
+                    wd = requests.get(
+                        f"https://www.wikidata.org/wiki/Special:EntityData/{qid}.json",
+                        headers={"User-Agent": "DRiskify/2.0 (vendor-due-diligence)"},
+                        timeout=8,
+                    )
+                    if wd.status_code == 200:
+                        inception = (
+                            wd.json()["entities"][qid]["claims"]["P571"][0]
+                            ["mainsnak"]["datavalue"]["value"]["time"]
+                        )
+                        ym = re.search(r'([+-]\d{4})-\d{2}-\d{2}', inception)
+                        if ym:
+                            out["founded"] = str(abs(int(ym.group(1))))
+                            src["founded"] = "wikidata"
+                except Exception:
+                    pass
+
+            if "founded" not in out:
+                m = re.search(r'(?:founded|established|incorporated)[^0-9]*((?:18|19|20)\d{2})', tl)
+                if m:
+                    out["founded"] = m.group(1)
+                    src["founded"] = "wikipedia_extract"
 
             # Founder
             for pat in [
@@ -472,12 +520,13 @@ def _wikipedia_financials(vendor: str) -> dict:
                 m = re.search(pat, extract)
                 if m and _is_valid_name(m.group(1)):
                     out["founder"] = m.group(1).strip()
+                    src["founder"] = "wikipedia_extract"
                     break
 
     except Exception as e:
         _safe_print(f"  [!] Wikipedia REST [{vendor}]: {e}")
 
-    return out
+    return out, src
 
 
 # ─── Name Validation Helpers ──────────────────────────────────────────────────
@@ -515,7 +564,9 @@ def _is_valid_name(s: str) -> bool:
 
 # ─── CEO Fetcher ─────────────────────────────────────────────────────────────
 
-def _fetch_ceo(vendor: str, company_url: str = "") -> str:
+def _fetch_ceo(vendor: str, company_url: str = "") -> tuple[str, str]:
+    """Returns (name, source) - source is "wikipedia_extract" for an infobox
+    regex match, "llm_estimate" for the Groq snippet-synthesis fallback."""
     # 1. Wikipedia Direct
     wiki_url = f"https://en.wikipedia.org/wiki/{vendor.replace(' ', '_')}"
     wiki_page = _webpage(wiki_url, 5000)
@@ -530,13 +581,13 @@ def _fetch_ceo(vendor: str, company_url: str = "") -> str:
                 cand = re.sub(r'\[\[|\]\]|\{\{|\}\}|<[^>]+>', '', m.group(1)).strip()
                 cand = cand.split("(")[0].split(",")[0].strip()
                 if _is_valid_name(cand):
-                    return cand
+                    return cand, "wikipedia_extract"
 
     # 2. Serper Search
     q = f'"{vendor}" CEO current Chief Executive Officer'
     hits = _serper(q, 4)
     snippets = " ".join([h.get("title", "") + " " + h.get("snippet", "") for h in hits])
-    
+
     # 3. Groq Snippet & Factual Knowledge Extraction
     prompt = (
         f"Who is the current CEO of {vendor}?\n"
@@ -546,15 +597,18 @@ def _fetch_ceo(vendor: str, company_url: str = "") -> str:
     )
     res = _groq(prompt, max_tokens=25)
     if res and "not available" not in res.lower() and _is_valid_name(res):
-        return res
+        return res, "llm_estimate"
 
-    return ""
+    return "", ""
 
 
 # ─── Corporate Profile Scraper ───────────────────────────────────────────────
 
-def _scrape_profile(vendor: str, country: str = "Canada", company_url: str = "") -> dict:
+def _scrape_profile(vendor: str, country: str = "Canada", company_url: str = "") -> tuple[dict, dict]:
+    """Returns (values, sources) - source is "web_scrape" for a regex match on
+    search-snippet text, "llm_estimate" for the Groq knowledge-recall fallback."""
     p = {}
+    src = {}
     combined = ""
     urls = []
 
@@ -580,11 +634,13 @@ def _scrape_profile(vendor: str, country: str = "Canada", company_url: str = "")
     m = re.search(r'(?:founded|established|incorporated)[^\d]*((?:18|19|20)\d{2})', tl)
     if m:
         p["founded"] = m.group(1)
+        src["founded"] = "web_scrape"
 
     # Founder regex
     m = re.search(r'(?:founded by|co-founded by|founders?:)[^\w\n]*([A-Z][a-zA-Z\u00C0-\u024F\.\-]{1,25}(?: [A-Z][a-zA-Z\u00C0-\u024F\.\-]{1,25}){1,3})', combined)
     if m and _is_valid_name(m.group(1)):
         p["founder"] = m.group(1).strip()
+        src["founder"] = "web_scrape"
 
     # Headquarters regex
     m = re.search(r'(?:headquartered in|headquarters[:\s]+|based in)\s+([A-Za-z\s,\.\-]+?)(?:\.|\n|;|<)', combined)
@@ -592,11 +648,13 @@ def _scrape_profile(vendor: str, country: str = "Canada", company_url: str = "")
         hq_val = m.group(1).strip()
         if 3 < len(hq_val) < 60 and not any(k in hq_val.lower() for k in ["http", "www", "overview", "history"]):
             p["headquarters"] = hq_val
+            src["headquarters"] = "web_scrape"
 
     # Employees regex
     m = re.search(r'\b(\d{1,3}(?:,\d{3})+|\d{2,6})\s+(?:employees|people|workforce|staff)\b', tl)
     if m:
         p["employees"] = m.group(1)
+        src["employees"] = "web_scrape"
 
     # 3. Groq Dual Knowledge + Context Synthesis
     missing = [f for f in ("founded", "founder", "headquarters", "employees", "ceo") if f not in p]
@@ -622,10 +680,11 @@ def _scrape_profile(vendor: str, country: str = "Canada", company_url: str = "")
                         if field in ("founder", "ceo") and not _is_valid_name(str(val)):
                             continue
                         p[field] = str(val)
+                        src[field] = "llm_estimate"
             except Exception:
                 pass
 
-    return p
+    return p, src
 
 
 # ─── Public API ──────────────────────────────────────────────────────────────
@@ -636,14 +695,20 @@ def fetch_financial_and_profile(
     ticker: str = "",
     web_snippets: str = "",
     company_url: str = "",
-) -> tuple[dict, dict]:
+) -> tuple[dict, dict, dict]:
     """
-    Fetches comprehensive financial metrics and authoritative corporate profile details.
+    Fetches comprehensive financial metrics and authoritative corporate profile
+    details. Returns (financial_metrics, profile_extras, profile_sources) -
+    profile_sources tags each populated profile_extras field with how it was
+    obtained ("yfinance" / "wikidata" / "wikipedia_extract" / "web_scrape" /
+    "llm_estimate"), so callers can surface confidence rather than presenting
+    a best-effort LLM guess with the same certainty as a structured lookup.
     """
     _safe_print(f"  [+] Ingesting Corporate Profile & Financials: {vendor} ({country})")
 
     financial_metrics = {}
     profile_extras = {}
+    profile_sources = {}
 
     cu = company_url.strip()
     if cu and not cu.startswith("http"):
@@ -657,23 +722,35 @@ def fetch_financial_and_profile(
         wiki_future = ex.submit(_wikipedia_financials, vendor)
 
         resolved_ticker = ticker.strip() or (ticker_future.result() if ticker_future else "")
-        prof = profile_future.result()
-        ceo_from_web = ceo_future.result()
-        wiki_data = wiki_future.result()
+        prof, prof_src = profile_future.result()
+        ceo_from_web, ceo_src = ceo_future.result()
+        wiki_data, wiki_src = wiki_future.result()
 
     # Merge in order: scrape → wikipedia → ceo override
     profile_extras.update(prof)
+    profile_sources.update(prof_src)
 
-    # Wikipedia fills any gaps left by regex scraping
+    # Wikipedia normally only fills gaps left by regex scraping (two
+    # similarly-weak text matches - not worth reordering by guesswork over
+    # which happened to run first). But a Wikidata "inception" hit is a
+    # structured, deterministic fact, not another guess, so it overrides an
+    # already-filled web_scrape/llm_estimate value the same way yfinance
+    # overrides below. Confirmed live: without this, a Serper regex match
+    # populated "founded" first and silently blocked the Wikidata value from
+    # ever being used, even though Wikidata is strictly more authoritative.
     for wk in ("employees", "headquarters", "founded", "founder", "revenue"):
-        if wiki_data.get(wk) and not profile_extras.get(wk):
+        already_have = profile_extras.get(wk) if wk != "revenue" else financial_metrics.get(wk)
+        is_wikidata_fact = wiki_src.get(wk) == "wikidata"
+        if wiki_data.get(wk) and (not already_have or is_wikidata_fact):
             if wk == "revenue":
                 financial_metrics["revenue"] = wiki_data[wk]
             else:
                 profile_extras[wk] = wiki_data[wk]
+                profile_sources[wk] = wiki_src.get(wk, "wikipedia_extract")
 
     if ceo_from_web:
         profile_extras["ceo"] = ceo_from_web
+        profile_sources["ceo"] = ceo_src
 
     # Pull yfinance for public companies (silent on 401 — Yahoo blocks Render IPs)
     if resolved_ticker:
@@ -685,12 +762,20 @@ def fetch_financial_and_profile(
             if yf_data.get(k):
                 financial_metrics[k] = yf_data[k]
 
-        # Use yfinance profile if missing from web/wikipedia
+        # yfinance is a structured, company-reported source for these three
+        # fields — more authoritative than a freeform regex match on
+        # arbitrary web text, so it takes priority here rather than only
+        # filling gaps. Confirmed live: a regex scrape wrongly matched a
+        # vendor's employee count AND headquarters city (Toronto instead of
+        # the real Montreal) while yfinance had the correct values for both,
+        # but the old "only fill if missing" order let the wrong scrape win
+        # since it ran first.
         for pk in ("employees", "headquarters", "ceo"):
-            if yf_data.get(pk) and not profile_extras.get(pk):
+            if yf_data.get(pk):
                 profile_extras[pk] = yf_data[pk]
+                profile_sources[pk] = "yfinance"
 
     _safe_print(f"  [+] Ingested Profile: {profile_extras}")
     _safe_print(f"  [+] Ingested Financial Metrics: {list(financial_metrics.keys())}")
 
-    return financial_metrics, profile_extras
+    return financial_metrics, profile_extras, profile_sources

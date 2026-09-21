@@ -18,6 +18,36 @@ CANADIAN_SUFFIXES = [
     r"\bgmbh\.?\b", r"\bsa\.?\b", r"\bag\.?\b", r"\bpvt\.?\b", r"\bholdings\b"
 ]
 
+# Section 4.2: "Apply bilingual name resolution where applicable (English /
+# French equivalents for pan-Canadian entities)." Scoped to entities with a
+# statutorily or commonly used distinct French legal/trade name — not every
+# vendor has one, and fabricating a French name for an entity that doesn't
+# use one would actively hurt search relevance rather than help it.
+FRENCH_EQUIVALENTS = {
+    "royal bank of canada": "Banque Royale du Canada",
+    "rbc": "Banque Royale du Canada",
+    "bank of montreal": "Banque de Montréal",
+    "bmo": "Banque de Montréal",
+    "bank of nova scotia": "Banque Scotia",
+    "scotiabank": "Banque Scotia",
+    "toronto-dominion bank": "Banque Toronto-Dominion",
+    "td bank": "Banque Toronto-Dominion",
+    "canadian imperial bank of commerce": "Banque Canadienne Impériale de Commerce",
+    "cibc": "Banque Canadienne Impériale de Commerce",
+    "national bank of canada": "Banque Nationale du Canada",
+    "canada post": "Postes Canada",
+    "canadian national railway": "Compagnie des chemins de fer nationaux du Canada",
+    "cn rail": "Compagnie des chemins de fer nationaux du Canada",
+    "via rail": "VIA Rail Canada",
+    "canadian broadcasting corporation": "Société Radio-Canada",
+    "cbc": "Société Radio-Canada",
+    "canada mortgage and housing corporation": "Société canadienne d'hypothèques et de logement",
+    "cmhc": "Société canadienne d'hypothèques et de logement",
+    "export development canada": "Exportation et développement Canada",
+    "business development bank of canada": "Banque de développement du Canada",
+    "bdc": "Banque de développement du Canada",
+}
+
 # Common Canadian entity acronym mapping
 KNOWN_ACRONYMS = {
     "royal bank of canada": ["RBC", "Royal Bank"],
@@ -89,10 +119,16 @@ def normalize_vendor_name(name: str) -> dict:
         if len(acronym) >= 2 and acronym not in variants:
             variants.append(acronym)
 
+    # Section 4.2 bilingual name resolution
+    french_variant = FRENCH_EQUIVALENTS.get(low_clean) or FRENCH_EQUIVALENTS.get(raw.lower())
+    if french_variant and french_variant not in variants:
+        variants.append(french_variant)
+
     return {
         "raw_name": raw,
         "normalized_name": clean or raw,
-        "variants": list(dict.fromkeys(variants))  # Deduplicated preserving order
+        "variants": list(dict.fromkeys(variants)),  # Deduplicated preserving order
+        "french_variant": french_variant,
     }
 
 

@@ -25,7 +25,7 @@ vendoriq/
 ├── sedarplus_lookup.py   # Direct SEDAR+ (sedarplus.ca) filing search
 ├── normalizer.py         # Suffix stripping, acronym expansion & BN validation
 ├── financial_fetcher.py  # yfinance & public filing ratio extraction
-├── cyber_intel.py        # Real NVD CVE + CISA KEV Catalogue integrations
+├── cyber_intel.py        # Real NVD CVE + CISA KEV + CCCS advisory feed integrations
 ├── sanctions_check.py    # Real OFAC SDN sanctions list cross-reference
 ├── licensed_sources.py   # Licensed-source (BitSight/Refinitiv/etc.) gap disclosure
 ├── frameworks.py         # Named regulatory framework alignment (OSFI Corporate Governance
@@ -51,6 +51,8 @@ Beyond the 5 weighted dimensions, the Key-Person/Governance and Compliance dimen
 
 - **OSFI Corporate Governance Guideline** — board risk oversight, independent risk committee, chair/CEO separation, code of conduct, whistleblower policy, succession planning
 - **OSFI Guideline E-13 (Regulatory Compliance Management)** — named compliance function, compliance framework, monitoring/testing, board reporting, remediation process, enforcement history
+- **FINTRAC Guidance (AML/ATF Compliance Program)** — compliance officer, written program, risk assessment, training, independent effectiveness review, AMP history
+- **OPC Guidelines (PIPEDA Privacy Program)** — accountability, breach notification process, public privacy policy, safeguards, PIPEDA finding history
 
 Each principle resolves to `evidence_found`, `evidence_of_concern`, or `not_disclosed_in_available_sources` (negation-aware keyword matching against the evidence corpus) — absence of evidence is never assumed to pass or fail. Additional named frameworks can be added the same way in `frameworks.py`.
 

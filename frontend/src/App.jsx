@@ -10,6 +10,7 @@ import GaugeMeter from './components/GaugeMeter';
 import RadarChart from './components/RadarChart';
 import DimensionCard from './components/DimensionCard';
 import EscalationBanner from './components/EscalationBanner';
+import SourceBadge from './components/SourceBadge';
 
 export default function App() {
   const [vendorInput, setVendorInput] = useState('Shopify Inc.');
@@ -128,6 +129,26 @@ export default function App() {
       setLoading(false);
       setLoadingStep(0);
     }
+  };
+
+  // SK-VDD-001 Section 4.1: "NIVETA shall not assume any additional context
+  // beyond what is explicitly provided." Typing a new vendor name means the
+  // ticker/URL/BN/DUNS/NAICS/industry from whatever was previously looked
+  // up no longer belong to this vendor — without this, the pipeline would
+  // silently keep querying yfinance with the OLD ticker, attaching a
+  // different real company's financial data under the new vendor's name
+  // and profile (confirmed live: searching "Canadian Tire" right after
+  // Shopify pulled up Shopify's SHOP.TO financials under Canadian Tire's
+  // name). Only selectPreset — which sets these fields atomically together
+  // for one specific, known vendor — should populate them.
+  const handleVendorNameChange = (value) => {
+    setVendorInput(value);
+    setIndustry('');
+    setCompanyUrl('');
+    setTicker('');
+    setBusinessNumber('');
+    setDunsNumber('');
+    setNaicsCode('');
   };
 
   const selectPreset = (p) => {
@@ -263,7 +284,7 @@ export default function App() {
               <input
                 type="text"
                 value={vendorInput}
-                onChange={(e) => setVendorInput(e.target.value)}
+                onChange={(e) => handleVendorNameChange(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleRunAnalysis()}
                 placeholder="Enter vendor legal name (e.g. Shopify Inc., BlackBerry Ltd., CGI Inc.)..."
                 className="w-full pl-10 pr-4 py-2.5 bg-surface border border-border rounded-lg text-ink-50 text-sm focus:outline-none focus:border-accent transition-colors placeholder:text-ink-500"
@@ -438,11 +459,11 @@ export default function App() {
             {/* Entity Intelligence Quick Bar */}
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-px bg-border rounded-2xl overflow-hidden border border-border">
               {[
-                { icon: Key, label: 'Executive leadership', value: result.company_profile?.ceo, iconColor: 'text-violet-400' },
-                { icon: Building2, label: 'Corporate founder', value: result.company_profile?.founder, iconColor: 'text-sky-400' },
-                { icon: Clock, label: 'Incorporated', value: result.company_profile?.founded, iconColor: 'text-ink-400' },
-                { icon: Globe, label: 'Headquarters', value: result.company_profile?.headquarters, iconColor: 'text-amber-400' },
-                { icon: Users, label: 'Est. employees', value: result.company_profile?.employees, iconColor: 'text-ink-400' },
+                { icon: Key, label: 'Executive leadership', value: result.company_profile?.ceo, source: result.company_profile?.field_sources?.ceo, iconColor: 'text-violet-400' },
+                { icon: Building2, label: 'Corporate founder', value: result.company_profile?.founder, source: result.company_profile?.field_sources?.founder, iconColor: 'text-sky-400' },
+                { icon: Clock, label: 'Incorporated', value: result.company_profile?.founded, source: result.company_profile?.field_sources?.founded, iconColor: 'text-ink-400' },
+                { icon: Globe, label: 'Headquarters', value: result.company_profile?.headquarters, source: result.company_profile?.field_sources?.headquarters, iconColor: 'text-amber-400' },
+                { icon: Users, label: 'Est. employees', value: result.company_profile?.employees, source: result.company_profile?.field_sources?.employees, iconColor: 'text-ink-400' },
                 { icon: TrendingUp, label: 'Annual revenue', value: result.company_profile?.financial_metrics?.revenue, mono: true, iconColor: 'text-tier-low', valueColor: 'text-tier-low' },
               ].map((cell, i) => (
                 <div key={i} className="bg-surface hover:bg-surface-hover transition-colors p-3.5 flex flex-col justify-between gap-1.5">
@@ -452,6 +473,7 @@ export default function App() {
                   <span className={`text-xs font-medium truncate ${cell.mono ? 'font-mono' : ''} ${cell.value ? (cell.valueColor || 'text-ink-50') : 'text-ink-500'}`} title={cell.value}>
                     {cell.value || (cell.label === 'Annual revenue' ? 'Private / unlisted' : 'Not available')}
                   </span>
+                  {cell.value && cell.source && <SourceBadge source={cell.source} />}
                 </div>
               ))}
             </div>
@@ -553,6 +575,7 @@ export default function App() {
                   score={result.risk_scores?.financial ?? 20}
                   sources="SEDAR+ filings, CBCA registry, solvency, liquidity ratios"
                   summary={result.explanations?.financial?.summary}
+                  source={result.explanations?.financial?.source}
                   signals={result.explanations?.financial?.signals}
                   links={result.evidence_links?.financial}
                 />
@@ -563,6 +586,7 @@ export default function App() {
                   score={result.risk_scores?.reputation ?? 20}
                   sources="CBC, Globe and Mail, Financial Post, CanLII litigation (36m)"
                   summary={result.explanations?.reputation?.summary}
+                  source={result.explanations?.reputation?.source}
                   articles={result.explanations?.reputation?.articles}
                   links={result.evidence_links?.reputation}
                 />
@@ -573,6 +597,7 @@ export default function App() {
                   score={result.risk_scores?.key_person ?? 20}
                   sources="SEDI insiders, LinkedIn, OFAC/OSFI sanctions lists, CanLII"
                   summary={result.explanations?.key_person?.summary}
+                  source={result.explanations?.key_person?.source}
                   persons={result.explanations?.key_person?.persons}
                   links={result.evidence_links?.key_person}
                   frameworkAlignment={result.framework_alignment?.key_person}
@@ -584,6 +609,7 @@ export default function App() {
                   score={result.risk_scores?.cyber ?? 20}
                   sources="CCCS (cyber.gc.ca), CISA KEV, NVD (CVSS ≥ 7.0), HIBP"
                   summary={result.explanations?.cyber?.summary}
+                  source={result.explanations?.cyber?.source}
                   signals={result.explanations?.cyber?.signals}
                   links={result.evidence_links?.cyber}
                 />
@@ -594,6 +620,7 @@ export default function App() {
                   score={result.risk_scores?.compliance ?? 20}
                   sources="OSFI enforcement, FINTRAC AMPs, CSA orders, OPC PIPEDA, CRTC"
                   summary={result.explanations?.compliance?.summary}
+                  source={result.explanations?.compliance?.source}
                   signals={result.explanations?.compliance?.signals}
                   links={result.evidence_links?.compliance}
                   frameworkAlignment={result.framework_alignment?.compliance}
@@ -613,15 +640,18 @@ export default function App() {
                       { k: 'Legal entity name', v: result.vendor_name },
                       { k: 'Jurisdiction', v: result.registration_country },
                       { k: 'CRA business number', v: result.business_number || 'Inferred via registry' },
-                      { k: 'Executive leadership (CEO)', v: result.company_profile?.ceo || 'Not available' },
-                      { k: 'Corporate founder', v: result.company_profile?.founder || 'Not available' },
-                      { k: 'Incorporation year', v: result.company_profile?.founded || 'Not available' },
-                      { k: 'Principal headquarters', v: result.company_profile?.headquarters || 'Not available' },
-                      { k: 'Estimated employees', v: result.company_profile?.employees || 'Not available' },
+                      { k: 'Executive leadership (CEO)', v: result.company_profile?.ceo, source: result.company_profile?.field_sources?.ceo },
+                      { k: 'Corporate founder', v: result.company_profile?.founder, source: result.company_profile?.field_sources?.founder },
+                      { k: 'Incorporation year', v: result.company_profile?.founded, source: result.company_profile?.field_sources?.founded },
+                      { k: 'Principal headquarters', v: result.company_profile?.headquarters, source: result.company_profile?.field_sources?.headquarters },
+                      { k: 'Estimated employees', v: result.company_profile?.employees, source: result.company_profile?.field_sources?.employees },
                     ].map((row, i) => (
                       <div key={i} className="py-2.5 flex justify-between gap-4">
                         <span className="text-ink-500">{row.k}</span>
-                        <span className="text-ink-50 font-medium text-right">{row.v}</span>
+                        <span className="flex items-center gap-2 text-right">
+                          {row.v && row.source && <SourceBadge source={row.source} />}
+                          <span className="text-ink-50 font-medium">{row.v || 'Not available'}</span>
+                        </span>
                       </div>
                     ))}
                   </div>

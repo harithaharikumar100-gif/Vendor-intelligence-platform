@@ -70,3 +70,29 @@ AMP_MATERIALITY_THRESHOLD_CAD = max(10000, min(1_000_000, _env_int("AMP_MATERIAL
 # forever, silently missing anything that happened after the first run.
 # Default: 1 hour.
 CACHE_TTL_SECONDS = max(60, _env_int("CACHE_TTL_SECONDS", 3600))
+
+# ── API hardening (not spec-derived — operational hygiene) ───────────────────
+
+# Comma-separated list of origins allowed to call the API. Defaults to the
+# local Vite dev server + same-origin production serving, not "*" — the
+# previous wildcard combined with allow_credentials=True was already an
+# invalid combination browsers reject, so this is a strict improvement, not
+# a behavior change for any request that was actually working before.
+ALLOWED_ORIGINS = [
+    o.strip() for o in os.getenv(
+        "ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:8000,http://127.0.0.1:3000,http://127.0.0.1:8000"
+    ).split(",") if o.strip()
+]
+
+# Optional shared-secret API key. When unset (the default), no auth is
+# enforced — preserves today's local-dev behavior. When set, /api/analyze and
+# /api/download-pdf require a matching X-API-Key header; /api/health and
+# /api/presets stay open.
+API_KEY = os.getenv("API_KEY", "").strip()
+
+# Simple per-IP rate limit on /api/analyze — the expensive endpoint that
+# burns LLM + search quota per call. Sliding window, in-memory (single
+# process only; see the thread-safety note on ANALYSIS_CACHE for why that's
+# an acceptable scope for now).
+RATE_LIMIT_MAX_REQUESTS = max(1, _env_int("RATE_LIMIT_MAX_REQUESTS", 20))
+RATE_LIMIT_WINDOW_SECONDS = max(1, _env_int("RATE_LIMIT_WINDOW_SECONDS", 60))

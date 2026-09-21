@@ -9,6 +9,9 @@ and require no license:
   configurable min_cvss_score parameter (Section 11).
 - CISA Known Exploited Vulnerabilities (KEV) Catalogue: the full JSON feed,
   filtered for entries naming the vendor as vendorProject.
+- CCCS (cyber.gc.ca) Alerts & Advisories Atom feed: real, free, public feed
+  of Canadian Centre for Cyber Security advisories, filtered for entries
+  naming the vendor/product.
 - HaveIBeenPwned domain breach search: only called if HIBP_API_KEY is configured
   (HIBP v3 requires a paid key); otherwise this is reported as a licensed-source
   gap by licensed_sources.py rather than silently faked.
@@ -21,14 +24,22 @@ verification). All calls are defensive and never raise.
 import os
 import re
 import requests
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
 import config
 
 NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 CISA_KEV_FEED = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
+# Real, free, public Atom feed (verified directly — the documented /rss/
+# path 301-redirects here) of actual CCCS security advisories, e.g.
+# "[Control systems] ABB security advisory (AV26-942)". This is Section
+# 6.4.1 step 24's actual named source, not the generic Google search for
+# the literal string "CCCS" that scraper.py's cyber query template runs.
+CCCS_ATOM_FEED = "https://www.cyber.gc.ca/api/cccs/atom/v1/get?feed=alerts_advisories&lang=en"
 
 _CISA_KEV_CACHE = {"data": None, "fetched_at": None}
+_CCCS_CACHE = {"entries": None, "fetched_at": None}
 
 
 def _safe_print(msg: str):
@@ -40,6 +51,46 @@ def _safe_print(msg: str):
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _word_match(needle: str, haystack: str) -> bool:
+    """
+    Word-boundary match, not a plain substring check. Confirmed live: a
+    vendor named "Metro" was matching CVEs about an unrelated product called
+    "Metronome" (and similar) purely because "metro" is a substring of
+    "metronome" — this produced confidently-wrong "Critical/High severity"
+    cyber findings under the wrong vendor's name. NVD/CISA/CCCS text search
+    is loose by design; this is our own stricter filter on top of it.
+    """
+    if not needle:
+        return False
+    return re.search(rf"\b{re.escape(needle.lower())}\b", haystack.lower()) is not None
+
+
+# Generic corporate/legal terms and common English words that show up inside
+# many real vendor names (e.g. "Canadian National Railway Company"). Confirmed
+# live: splitting that name into words and OR-matching each one let the lone
+# word "national" false-match an unrelated "National Instruments security
+# advisory" CCCS entry — the same substring-style false-positive class as the
+# original "Metro"/"Metronome" bug, just one level up (whole-word match on a
+# word that is itself too generic to identify the vendor). These are excluded
+# from the per-word OR-match; the full multi-word phrase is still tried as-is.
+_GENERIC_NAME_WORDS = {
+    "inc", "incorporated", "corp", "corporation", "company", "co",
+    "ltd", "limited", "llc", "lp", "plc", "group", "holdings", "holding",
+    "international", "global", "national", "canadian", "canada", "american",
+    "the", "and", "of", "for", "services", "systems", "solutions",
+}
+
+
+def _distinctive_words(vendor_or_product: str) -> list:
+    """Words from the vendor name worth OR-matching individually — i.e. not
+    generic enough to false-match unrelated entries on their own. Falls back
+    to the full word list if every word happens to be generic (e.g. the
+    vendor's name genuinely IS just "National")."""
+    words = [w for w in re.split(r"\s+", vendor_or_product.lower()) if len(w) > 2]
+    distinctive = [w for w in words if w not in _GENERIC_NAME_WORDS]
+    return distinctive or words
 
 
 def query_nvd_cves(vendor_or_product: str, min_cvss: float = None, max_results: int = 10) -> dict:
@@ -80,6 +131,8 @@ def query_nvd_cves(vendor_or_product: str, min_cvss: float = None, max_results: 
                     break
             if base_score is None or base_score < min_cvss:
                 continue
+            if not _word_match(vendor_or_product, desc):
+                continue  # NVD's own keywordSearch is a loose full-text match; this is our stricter filter
 
             cves.append({
                 "cve_id": cve_id,
@@ -129,13 +182,13 @@ def query_cisa_kev(vendor_or_product: str) -> dict:
     try:
         kev = _load_cisa_kev()
         needle = vendor_or_product.lower()
-        words = [w for w in re.split(r"\s+", needle) if len(w) > 2]
+        words = _distinctive_words(vendor_or_product)
         matches = []
         for entry in kev:
             vp = str(entry.get("vendorProject", "")).lower()
             prod = str(entry.get("product", "")).lower()
             haystack = f"{vp} {prod}"
-            if any(w in haystack for w in words):
+            if _word_match(needle, haystack) or any(_word_match(w, haystack) for w in words):
                 matches.append({
                     "cve_id": entry.get("cveID", ""),
                     "vendor_project": entry.get("vendorProject", ""),
@@ -153,6 +206,69 @@ def query_cisa_kev(vendor_or_product: str) -> dict:
             _safe_print(f"  [✓] CISA KEV: {len(matches)} known-exploited entr(ies) for '{vendor_or_product}'")
     except Exception as e:
         _safe_print(f"  [!] CISA KEV filter failed for '{vendor_or_product}': {e}")
+    return result
+
+
+def _load_cccs_advisories() -> list:
+    """Fetches and caches the real CCCS alerts & advisories Atom feed."""
+    if _CCCS_CACHE["entries"] is not None:
+        return _CCCS_CACHE["entries"]
+    entries = []
+    try:
+        r = requests.get(CCCS_ATOM_FEED, timeout=20, headers={"User-Agent": "DRiskify-SK-VDD-001/1.0"})
+        if r.status_code == 200:
+            ns = {"a": "http://www.w3.org/2005/Atom"}
+            root = ET.fromstring(r.content)
+            for entry in root.findall("a:entry", ns):
+                title_el = entry.find("a:title", ns)
+                link_el = entry.find("a:link", ns)
+                updated_el = entry.find("a:updated", ns)
+                entries.append({
+                    "title": (title_el.text or "").strip() if title_el is not None else "",
+                    "url": link_el.get("href", "") if link_el is not None else "",
+                    "updated": (updated_el.text or "") if updated_el is not None else "",
+                })
+            _safe_print(f"  [✓] CCCS advisory feed loaded: {len(entries)} entries")
+        else:
+            _safe_print(f"  [~] CCCS advisory feed returned {r.status_code}")
+    except Exception as e:
+        _safe_print(f"  [!] CCCS advisory feed fetch failed: {e}")
+    _CCCS_CACHE["entries"] = entries
+    _CCCS_CACHE["fetched_at"] = _now_iso()
+    return entries
+
+
+def query_cccs_advisories(vendor_or_product: str) -> dict:
+    """
+    Filters the real CCCS alerts & advisories feed for entries whose title
+    names the vendor/product — same matching approach as query_cisa_kev.
+    The feed is a rolling window of recent advisories, not a full historical
+    archive, which matches the spec's own 36-month recency intent.
+    """
+    result = {"entries": [], "total": 0, "source": "CCCS (cyber.gc.ca)", "retrieved_at": _now_iso()}
+    if not vendor_or_product or len(vendor_or_product) < 3:
+        return result
+    try:
+        entries = _load_cccs_advisories()
+        needle = vendor_or_product.lower()
+        words = _distinctive_words(vendor_or_product)
+        matches = []
+        for e in entries:
+            title_lower = e["title"].lower()
+            if _word_match(needle, title_lower) or (words and any(_word_match(w, title_lower) for w in words)):
+                matches.append({
+                    "title": e["title"],
+                    "url": e["url"],
+                    "updated": e["updated"],
+                    "source": "CCCS (cyber.gc.ca)",
+                    "retrieved_at": result["retrieved_at"],
+                })
+        result["entries"] = matches[:10]
+        result["total"] = len(matches)
+        if matches:
+            _safe_print(f"  [✓] CCCS: {len(matches)} advisory/advisories naming '{vendor_or_product}'")
+    except Exception as e:
+        _safe_print(f"  [!] CCCS query failed for '{vendor_or_product}': {e}")
     return result
 
 
@@ -199,6 +315,7 @@ def gather_cyber_intelligence(vendor: str, domain: str = "") -> dict:
     """
     nvd = query_nvd_cves(vendor)
     kev = query_cisa_kev(vendor)
+    cccs = query_cccs_advisories(vendor)
     hibp = query_hibp_domain(domain) if domain else {"breaches": [], "total": 0, "queried": False}
 
     signals = []
@@ -221,6 +338,15 @@ def gather_cyber_intelligence(vendor: str, domain: str = "") -> dict:
             "url": entry["url"],
             "retrieved_at": entry["retrieved_at"],
         })
+    for entry in cccs["entries"]:
+        signals.append({
+            "category": "Government Advisory",
+            "indicator": f"CCCS Advisory: {entry['title']} (updated {entry['updated'][:10]})",
+            "severity": "High",
+            "source": entry["source"],
+            "url": entry["url"],
+            "retrieved_at": entry["retrieved_at"],
+        })
     for breach in hibp.get("breaches", []):
         signals.append({
             "category": "Data Breach",
@@ -236,6 +362,7 @@ def gather_cyber_intelligence(vendor: str, domain: str = "") -> dict:
         "signals": signals,
         "cve_count": nvd["total"],
         "kev_count": kev["total"],
+        "cccs_count": cccs["total"],
         "breach_count": hibp.get("total", 0),
         "recent_breach_flag": hibp.get("total", 0) > 0,
         "hibp_queried": hibp.get("queried", False),

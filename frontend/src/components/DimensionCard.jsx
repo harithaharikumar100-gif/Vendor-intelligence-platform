@@ -31,7 +31,14 @@ const principleLabel = (status) => {
   return 'Not disclosed in available sources';
 };
 
-export default function DimensionCard({ title, weight, score, sources, summary, signals, articles, persons, links, colorHex, frameworkAlignment }) {
+const sourceBadge = (source) => {
+  if (source === 'ai_synthesis') {
+    return { label: 'AI-synthesized', cls: 'text-accent-text border-accent-border bg-accent-muted' };
+  }
+  return { label: 'Rule-engine fallback', cls: 'text-ink-500 border-border' };
+};
+
+export default function DimensionCard({ title, weight, score, sources, summary, signals, articles, persons, links, colorHex, frameworkAlignment, source }) {
   const [expanded, setExpanded] = useState(false);
 
   const getTierLabel = (s) => {
@@ -49,9 +56,14 @@ export default function DimensionCard({ title, weight, score, sources, summary, 
       {/* Card Header */}
       <div className="p-5 flex items-center justify-between gap-4">
         <div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <h3 className="text-[15px] font-medium text-ink-50 tracking-tight">{title}</h3>
             <span className="text-xs text-ink-500">{weight}</span>
+            {source && (
+              <span className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${sourceBadge(source).cls}`}>
+                {sourceBadge(source).label}
+              </span>
+            )}
           </div>
           <p className="text-xs text-ink-500 mt-0.5">{sources}</p>
         </div>
