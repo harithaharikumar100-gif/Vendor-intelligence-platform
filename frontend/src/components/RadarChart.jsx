@@ -10,12 +10,15 @@ import {
 } from 'recharts';
 
 export default function RadarChart({ scores }) {
+  if (!scores || Object.values(scores).some(v => !Number.isFinite(v))) {
+    return <p className="p-6 text-sm text-ink-400">Chart unavailable: one or more dimensions lack sufficient evidence.</p>;
+  }
   const data = [
-    { subject: 'Financial (30%)', value: scores?.financial ?? 20, fullMark: 100 },
-    { subject: 'Reputation (20%)', value: scores?.reputation ?? 20, fullMark: 100 },
-    { subject: 'Key-Person (20%)', value: scores?.key_person ?? 20, fullMark: 100 },
-    { subject: 'Cyber & Tech (20%)', value: scores?.cyber ?? 20, fullMark: 100 },
-    { subject: 'Compliance (10%)', value: scores?.compliance ?? 20, fullMark: 100 },
+    { subject: 'Financial (30%)', value: scores?.financial ?? null, fullMark: 100 },
+    { subject: 'Reputation (20%)', value: scores?.reputation ?? null, fullMark: 100 },
+    { subject: 'Key-Person (20%)', value: scores?.key_person ?? null, fullMark: 100 },
+    { subject: 'Cyber & Tech (20%)', value: scores?.cyber ?? null, fullMark: 100 },
+    { subject: 'Compliance (10%)', value: scores?.compliance ?? null, fullMark: 100 },
   ];
 
   return (

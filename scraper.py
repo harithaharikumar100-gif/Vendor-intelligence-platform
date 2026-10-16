@@ -25,6 +25,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 from normalizer import normalize_vendor_name, extract_domain
 import config
+from evidence import now_utc, parse_date, months_before, within_months, source_id
+from urllib.parse import urlparse
+
+_QUERY_LOCAL = threading.local()
 
 load_dotenv()
 SERPER_API_KEY = os.getenv("SERPER_API_KEY", "").strip()
@@ -57,10 +61,12 @@ def _mark_unavailable(reason: str):
     with _STATUS_LOCK:
         _SEARCH_STATUS["available"] = False
         _SEARCH_STATUS["reason"] = reason
-    _safe_print(f"  [!] SEARCH GROUNDING UNAVAILABLE: {reason}")
+    _QUERY_LOCAL.status = "failed"
+    _safe_print("  [!] Search unavailable; inspect source status.")
 
 
 def _mark_available():
+    _QUERY_LOCAL.status = "success"
     with _STATUS_LOCK:
         _SEARCH_STATUS["available"] = True
         _SEARCH_STATUS["reason"] = ""
@@ -100,7 +106,11 @@ def _serper(query: str, num: int = 5) -> list:
     query_key = f"{query.strip()}__num_{num}"
     with _CACHE_LOCK:
         if query_key in _SERPER_CACHE:
-            return _SERPER_CACHE[query_key]
+            entry = _SERPER_CACHE[query_key]
+            if time.monotonic() - entry['cached_at'] < config.CACHE_TTL_SECONDS:
+                _QUERY_LOCAL.status = 'success'
+                return entry['hits']
+            del _SERPER_CACHE[query_key]
 
     for attempt in range(3):
         try:
@@ -120,12 +130,12 @@ def _serper(query: str, num: int = 5) -> list:
                         "title": rc.get("title", ""),
                         "snippet": rc.get("snippet", ""),
                         "url": rc.get("link", ""),
-                        "date": rc.get("date", "")
+                        "date": rc.get("date", ""), "retrieved_at": now_utc().isoformat()
                     }
                     for rc in r.json().get("organic", [])
                 ]
                 with _CACHE_LOCK:
-                    _SERPER_CACHE[query_key] = hits
+                    _SERPER_CACHE[query_key] = {'cached_at': time.monotonic(), 'hits': hits}
                 return hits
             elif r.status_code in (429, 500, 502, 503) and attempt < 2:
                 backoff = 2 ** attempt  # 1s, 2s
@@ -221,51 +231,26 @@ TIER1_DOMAINS = {
 
 
 def _is_tier1(hit: dict) -> bool:
-    url = (hit.get("url") or "").lower()
-    return any(d in url for d in TIER1_DOMAINS)
+    host = (urlparse(hit.get('url') or '').hostname or '').lower()
+    return any(host == d or host.endswith('.' + d) for d in TIER1_DOMAINS)
 
 
 def _stale(r: dict) -> bool:
-    """Enforces 36-month lookback window on risk incidents."""
-    txt = f"{r.get('date', '')} {r.get('title', '')} {r.get('snippet', '')}".lower()
-    # If the snippet is strictly about pre-2023 events and mentions no recent years
-    has_recent = any(str(y) in txt for y in range(MIN_LOOKBACK_YEAR, CURRENT_YEAR + 1))
-    if not has_recent and any(str(yr) in txt for yr in range(2010, MIN_LOOKBACK_YEAR)):
-        return True
-    return False
+    date = parse_date(r.get('date'))
+    if date:
+        return date.date() < months_before(config.LOOKBACK_MONTHS).date() or date.date() > now_utc().date()
+    years = [int(y) for y in re.findall(r'\b(?:19|20)\d{2}\b', f"{r.get('title', '')} {r.get('snippet', '')}")]
+    return bool(years) and max(years) < months_before(config.LOOKBACK_MONTHS).year
 
 
 def _is_recent_12m(r: dict) -> bool:
-    """
-    Best-effort check for Section 11's recency_multiplier_12m ("signals from
-    the most recent 12 months carry Nx weight"). Serper's `date` field is an
-    inconsistent mix of relative ("3 weeks ago") and absolute strings, so
-    this is deliberately conservative — it only returns True on a fairly
-    confident match, never guesses on an ambiguous or missing date. Under-
-    counting is the safe failure direction here, not over-counting.
-    """
-    date_str = (r.get("date") or "").lower().strip()
-    if not date_str:
-        return False
-    m = re.match(r'(\d+)\s+(day|week|month)s?\s+ago', date_str)
-    if m:
-        n, unit = int(m.group(1)), m.group(2)
-        if unit == "day":
-            return True
-        if unit == "week":
-            return n <= 52
-        return n <= 12  # month
-    return str(CURRENT_YEAR) in date_str
+    return within_months(r.get('date'), 12)
 
 
 def _relevant(r: dict, vendor_variants: list) -> bool:
-    """Verifies that result mentions the vendor or its recognized trade name/acronym."""
-    txt = f"{r.get('title', '')} {r.get('snippet', '')} {r.get('url', '')}".lower()
-    for variant in vendor_variants:
-        words = [w for w in variant.lower().split() if len(w) > 2]
-        if words and sum(1 for w in words if w in txt) >= max(1, len(words) // 2):
-            return True
-    return False
+    text = f"{r.get('title', '')} {r.get('snippet', '')}".casefold()
+    return any(re.search(r'(?<!\w)' + re.escape(v.casefold()) + r'(?!\w)', text)
+               for v in vendor_variants if len(v) >= 3)
 
 
 def _is_duplicate_event(title: str, kept_hits: list, threshold: float = 0.78) -> bool:
@@ -336,15 +321,21 @@ def _translate_french_hits(french_hits: list) -> str:
 
 def _search_category(cat: str, templates: list, vendor_clean: str, vendor_variants: list, domain_hint: str,
                       extra_queries: list = None):
-    hits, seen = [], set()
+    hits, seen, query_statuses = [], set(), []
     for tmpl in templates:
-        q = tmpl.replace("{vendor}", vendor_clean).replace("{years}", _YEARS_CLAUSE)
+        q = tmpl.replace("{vendor}", vendor_clean).replace("{years}", " OR ".join(str(y) for y in range(months_before(config.LOOKBACK_MONTHS).year, now_utc().year + 1)))
         if domain_hint and cat == "cyber":
             q += f' "{domain_hint}"'
-        for h in _serper(q, 5):
+        query_hits = _serper(q, 5)
+        query_statuses.append(getattr(_QUERY_LOCAL, 'status', 'unknown'))
+        for h in query_hits:
             if h["url"] in seen or _stale(h) or not _relevant(h, vendor_variants):
                 continue
             if _is_duplicate_event(h.get("title", ""), hits):
+                for prior in hits:
+                    if _is_duplicate_event(h.get('title', ''), [prior]):
+                        prior.setdefault('corroborating_sources', []).append(h['url'])
+                        break
                 continue
             seen.add(h["url"])
             hits.append(h)
@@ -353,10 +344,16 @@ def _search_category(cat: str, templates: list, vendor_clean: str, vendor_varian
     # the French-name variant), not templated with {vendor}/{years} since the
     # caller already built the exact string.
     for q in (extra_queries or []):
-        for h in _serper(q, 5):
+        query_hits = _serper(q, 5)
+        query_statuses.append(getattr(_QUERY_LOCAL, 'status', 'unknown'))
+        for h in query_hits:
             if h["url"] in seen or _stale(h) or not _relevant(h, vendor_variants):
                 continue
             if _is_duplicate_event(h.get("title", ""), hits):
+                for prior in hits:
+                    if _is_duplicate_event(h.get('title', ''), [prior]):
+                        prior.setdefault('corroborating_sources', []).append(h['url'])
+                        break
                 continue
             seen.add(h["url"])
             hits.append(h)
@@ -372,6 +369,10 @@ def _search_category(cat: str, templates: list, vendor_clean: str, vendor_varian
 
     return cat, {
         "text": text_block, "urls": [h["url"] for h in hits], "hit_count": len(hits),
+        "query_status": ('failed' if any(x != 'success' for x in query_statuses) else 'success' if hits else 'no_matches'),
+        "records": [{'id': source_id(h['url']), 'url': h['url'], 'text': h['title'] + '\n' + h['snippet'],
+                     'published_date': h.get('date', ''), 'retrieved_at': h.get('retrieved_at'),
+                     'corroborating_sources': h.get('corroborating_sources', [])} for h in hits],
         "recent_hit_count": recent_count, "french_hit_count": len(french_hits),
         "tier1_hit_count": tier1_count,
         # Section 9.1: "NIVETA shall record the retrieval timestamp for each
@@ -466,5 +467,8 @@ def collect_vendor_signals(vendor: str, industry: str = "", country: str = "Cana
         "business_number": business_number,
         "domain": domain_hint,
     }
-    context["search_grounding"] = search_grounding_status()
+    context["search_grounding"] = {
+        "available": all(context[c].get('query_status') in ('success', 'no_matches') for c in SEARCH_QUERIES),
+        "reason": "See per-dimension query status; failed checks are not clean results.",
+    }
     return context

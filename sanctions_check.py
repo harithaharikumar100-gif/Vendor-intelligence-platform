@@ -21,6 +21,8 @@ import csv
 import io
 import re
 import requests
+import config
+from evidence import expired
 from datetime import datetime, timezone
 
 SDN_URL = "https://sanctionslistservice.ofac.treas.gov/api/download/sdn.csv"
@@ -53,12 +55,14 @@ def _normalize_name(name: str) -> set:
 
 def _load_sdn() -> list:
     """Fetches and caches the OFAC SDN list. Free, public, no key required."""
-    if _SDN_CACHE["rows"] is not None:
+    if _SDN_CACHE["rows"] is not None and not expired(_SDN_CACHE.get("fetched_at"), config.CACHE_TTL_SECONDS if _SDN_CACHE.get("status") == "success" else 30):
         return _SDN_CACHE["rows"]
     rows = []
+    _SDN_CACHE["status"] = "failed"
     try:
         r = requests.get(SDN_URL, timeout=25, headers={"User-Agent": "DRiskify-SK-VDD-001/1.0"})
         if r.status_code == 200:
+            _SDN_CACHE["status"] = "success"
             reader = csv.reader(io.StringIO(r.text))
             for cols in reader:
                 if len(cols) < 4:
@@ -113,3 +117,8 @@ def search_sdn(query_name: str, min_shared_tokens: int = 2) -> list:
                 "retrieved_at": _SDN_CACHE["fetched_at"],
             })
     return matches
+
+
+def source_status():
+    return {'source': 'OFAC SDN', 'status': _SDN_CACHE.get('status', 'not_queried'),
+            'retrieved_at': _SDN_CACHE.get('fetched_at'), 'method': 'direct_feed'}

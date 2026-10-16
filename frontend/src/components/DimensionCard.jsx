@@ -32,19 +32,20 @@ const principleLabel = (status) => {
 };
 
 const sourceBadge = (source) => {
-  if (source === 'ai_synthesis') {
-    return { label: 'AI-synthesized', cls: 'text-accent-text border-accent-border bg-accent-muted' };
+  if (source === 'source_linked_extraction') {
+    return { label: 'Evidence linked · Review required', cls: 'text-accent-text border-accent-border bg-accent-muted' };
   }
   return { label: 'Rule-engine fallback', cls: 'text-ink-500 border-border' };
 };
 
-export default function DimensionCard({ title, weight, score, sources, summary, signals, articles, persons, links, colorHex, frameworkAlignment, source }) {
+export default function DimensionCard({ title, weight, score, sources, summary, signals, articles, persons, links, colorHex, frameworkAlignment, source, parameters = {} }) {
   const [expanded, setExpanded] = useState(false);
 
   const getTierLabel = (s) => {
+    if (!Number.isFinite(s)) return { label: 'Not assessed', color: 'text-ink-500' };
     if (s <= 24) return { label: 'Low', color: 'text-tier-low' };
-    if (s <= 49) return { label: 'Medium', color: 'text-tier-medium' };
-    if (s <= 74) return { label: 'High', color: 'text-tier-high' };
+    if (s < (parameters.HIGH_SCORE_THRESHOLD ?? 50)) return { label: 'Medium', color: 'text-tier-medium' };
+    if (s < (parameters.CRITICAL_SCORE_THRESHOLD ?? 75)) return { label: 'High', color: 'text-tier-high' };
     return { label: 'Critical', color: 'text-tier-critical' };
   };
 
@@ -69,7 +70,7 @@ export default function DimensionCard({ title, weight, score, sources, summary, 
         </div>
 
         <div className="text-right shrink-0">
-          <span className={`text-xl font-semibold font-mono ${tier.color}`}>{score}</span>
+          <span className={`text-xl font-semibold font-mono ${tier.color}`}>{score ?? '—'}</span>
           <span className="text-xs text-ink-500 font-mono">/100</span>
           <div className={`text-[11px] font-medium uppercase tracking-wider mt-0.5 ${tier.color}`}>
             {tier.label}
@@ -81,10 +82,18 @@ export default function DimensionCard({ title, weight, score, sources, summary, 
       <div className="px-5 pb-4">
         <p className="text-sm text-ink-200 leading-relaxed">
           <span className="text-ink-500">Assessment — </span>
-          {summary || 'Standard operating posture verified across primary databases.'}
+          {summary || 'Insufficient verified evidence. No clean-screening conclusion is available.'}
         </p>
       </div>
 
+      <div className="px-5 pb-4 space-y-2 text-xs text-ink-400">
+        {[...(signals || []), ...(articles || []), ...(persons || [])].map((event, i) => (
+          <div key={event.event_id || i}>
+            <span>Finding {i + 1} · {event.verification_status || 'Unverified'} · Event: {event.event_date || 'Unknown'} · Retrieved: {event.retrieved_at || 'Unknown'}</span>
+            {(event.sources || []).filter(url => /^https?:\/\//i.test(url)).map(url => <a key={url} href={url} target="_blank" rel="noreferrer" className="block text-accent-text break-all">{url}</a>)}
+          </div>
+        ))}
+      </div>
       {/* Risk factors, point by point — always visible */}
       <div className="px-5 pb-4 space-y-5 text-[13px]">
         {signals && signals.length > 0 && (
@@ -112,7 +121,7 @@ export default function DimensionCard({ title, weight, score, sources, summary, 
         {articles && articles.length > 0 && (
           <div>
             <p className="text-ink-500 text-[11px] uppercase tracking-wider mb-2">
-              Key risk factors — adverse media, 36m horizon ({articles.length})
+              Source-linked media findings ({articles.length})
             </p>
             <ol className="space-y-0">
               {articles.map((a, idx) => (
@@ -148,7 +157,7 @@ export default function DimensionCard({ title, weight, score, sources, summary, 
                   <p className="text-ink-50 font-medium">
                     <span className="font-mono text-ink-500 mr-1.5">{idx + 1}.</span>{p.name}
                   </p>
-                  <p className="text-ink-500 text-[11px] mt-0.5">{p.role} · {p.tenure || 'Established'}</p>
+                  <p className="text-ink-500 text-[11px] mt-0.5">{p.role} · {p.tenure || 'Tenure not verified'}</p>
                   <div className="mt-1.5 flex flex-col gap-1">
                     {p.flags?.map((f, i) => (
                       <span key={i} className="text-[11px] text-ink-400 flex items-start gap-1.5">
@@ -194,7 +203,7 @@ export default function DimensionCard({ title, weight, score, sources, summary, 
             onClick={() => setExpanded(!expanded)}
             className="w-full px-5 py-3 flex items-center justify-between text-xs text-ink-500 hover:text-ink-200 transition-colors"
           >
-            <span>Verified source attributions ({links.length})</span>
+            <span>Cited sources ({links.length})</span>
             {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
           </button>
           {expanded && (

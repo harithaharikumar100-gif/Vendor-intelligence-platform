@@ -1,209 +1,104 @@
-# DRiskify 🛡️ (NIVETA Platform)
+# DRiskify — Vendor Intelligence Platform
 
-**AI-Native Vendor Due Diligence & Risk Intelligence Platform (SK-VDD-001)**
+Canadian vendor due-diligence evidence collection, provisional risk analysis, and analyst review, developed against the supplied SK-VDD-001 draft.
 
-DRiskify autonomously scores vendors across 5 risk dimensions in parallel — Financial Viability (30%), Reputational Risk (20%), Key-Person & Governance (20%), Technology & Cyber (20%), and Regulatory Compliance (10%) — using public intelligence from authoritative Canadian and international registries, live balance sheet metrics, and a multi-provider (Gemini → Groq → OpenAI) LLM synthesis layer with a deterministic rule-engine fallback.
+Assessments cover financial viability (30%), reputation (20%), key persons (20%), technology/cybersecurity (20%), and compliance (10%). A missing or failed check is **not** a clean screening result. Incomplete runs have no final overall score. All scoring remains provisional until the separate CFG-VDD-001 policy is available and approved by the risk owner.
 
-## Architecture
+## Development setup
 
-```
-vendoriq/
-├── frontend/             # Modern React 18 + Tailwind CSS + Recharts Web UI
-│   ├── src/
-│   │   ├── components/   # RadarChart, GaugeMeter, DimensionCard, EscalationBanner
-│   │   ├── App.jsx       # Hero search, quick presets, 5-dimension tabs, export
-│   │   └── index.css     # Premium minimal dark theme tokens (deep-black canvas, hairline borders, single accent color)
-│   ├── package.json
-│   └── vite.config.js
-├── server.py             # FastAPI REST backend (serves /api and static build)
-├── run_platform.py       # Unified platform launcher
-├── services.py           # Orchestration — SK-VDD-001 scoring math & 4-tier rating
-├── ai_engine.py          # Multi-provider LLM dispatch + Autonomous Rule Engine fallback
-├── scraper.py            # Parallel scraping: SEDAR+, CBCA, CBC, Globe & Mail, CCCS, CISA, CanLII
-├── registry_lookup.py    # Direct Corporations Canada / provincial registry lookup
-├── canlii_search.py      # Direct CanLII (canlii.org) litigation search
-├── sedarplus_lookup.py   # Direct SEDAR+ (sedarplus.ca) filing search
-├── normalizer.py         # Suffix stripping, acronym expansion & BN validation
-├── financial_fetcher.py  # yfinance & public filing ratio extraction
-├── cyber_intel.py        # Real NVD CVE + CISA KEV + CCCS advisory feed integrations
-├── sanctions_check.py    # Real OFAC SDN sanctions list cross-reference
-├── licensed_sources.py   # Licensed-source (BitSight/Refinitiv/etc.) gap disclosure
-├── frameworks.py         # Named regulatory framework alignment (OSFI Corporate Governance
-│                         #   Guideline, OSFI Guideline E-13, FINTRAC Guidance, OPC Guidelines)
-├── store.py              # Swappable job/cache/rate-limit store — in-memory or Redis (REDIS_URL)
-├── config.py             # Section 11 configurable skill parameters (env-driven)
-├── pdf_generator.py      # Official SK-VDD-001 PDF Summary Report generator
-└── .env                  # API keys (GROQ_API_KEY, GEMINI_API_KEY, SERPER_API_KEY)
-```
-
-## 5 Risk Dimensions (SK-VDD-001)
-
-| Dimension | Weight | Primary Sources | Focus & Thresholds |
-|---|---|---|---|
-| Financial Viability | 30% | SEDAR+, CBCA, Provincial Registries, CRA, yfinance | Solvency (D/E > 3.0x), Liquidity (Current Ratio < 1.0), EBITDA trends, Going-concern opinions |
-| Reputational Risk | 20% | CBC News, Globe & Mail, Financial Post, Google News, CanLII | Trailing 36m adverse media, 2.0x 12m recency multiplier, Tier-1 Canadian outlets, litigation |
-| Key-Person Risk | 20% | SEDI Insiders, LinkedIn, CBCA Registry, OFAC/OSFI Sanctions | Sanctions match, PEP, director disqualifications, single-person dependency, thin bench |
-| Technology & Cyber | 20% | CCCS (`cyber.gc.ca`), CISA KEV, NVD (CVSS ≥ 7.0) — free; HaveIBeenPwned & BitSight require a paid key, see Known Limitations | Confirmed breaches (past 3y), active CVEs, ransomware |
-| Regulatory Compliance | 10% | OSFI, FINTRAC AMPs, CSA, OPC PIPEDA, CRTC CASL | Enforcement orders, AMP penalties > $100k CAD, cease-trade orders. Active prohibition triggers Critical |
-
-## Named Regulatory Framework Alignment
-
-Beyond the 5 weighted dimensions, the Key-Person/Governance and Compliance dimensions are additionally checked against a specific, named set of supplied regulatory frameworks — rather than open-ended "regulation in general" reasoning:
-
-- **OSFI Corporate Governance Guideline** — board risk oversight, independent risk committee, chair/CEO separation, code of conduct, whistleblower policy, succession planning
-- **OSFI Guideline E-13 (Regulatory Compliance Management)** — named compliance function, compliance framework, monitoring/testing, board reporting, remediation process, enforcement history
-- **FINTRAC Guidance (AML/ATF Compliance Program)** — compliance officer, written program, risk assessment, training, independent effectiveness review, AMP history
-- **OPC Guidelines (PIPEDA Privacy Program)** — accountability, breach notification process, public privacy policy, safeguards, PIPEDA finding history
-
-Each principle resolves to `evidence_found`, `evidence_of_concern`, or `not_disclosed_in_available_sources` (negation-aware keyword matching against the evidence corpus) — absence of evidence is never assumed to pass or fail. Additional named frameworks can be added the same way in `frameworks.py`.
-
-## 4-Tier Rating Bands
-
-| Range | Rating | Meaning |
-|---|---|---|
-| 0 – 24 | 🟢 Low | No material concerns detected. Standard onboarding may proceed. |
-| 25 – 49 | 🟡 Medium | Some risk signals present. Enhanced due diligence recommended. |
-| 50 – 74 | 🟠 High | Significant risk signals. Senior review and conditional onboarding. |
-| 75 – 100 | 🔴 Critical | Severe risk signals. Escalation required; onboarding suspended. |
-
-## Quick Start
-
-**1. Clone**
+Python 3.12 and Node.js 24 were used for validation. Work in the existing checkout; a separate worktree is not required.
 
 ```bash
-git clone https://github.com/harithaharikumar100-gif/Vendor-intelligence-platform.git
-cd Vendor-intelligence-platform
-```
-
-**2. Create virtual environment**
-
-```bash
-python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
-```
-
-**3. Install dependencies**
-
-```bash
-pip install -r requirements.txt
-```
-
-**4. Configure `.env`**
-
-```env
-GEMINI_API_KEY=your_gemini_api_key
-GROQ_API_KEY=your_groq_api_key
-SERPER_API_KEY=your_serper_api_key
-```
-
-**5. Launch the Web Platform**
-
-Run the unified launcher:
-
-```bash
-python run_platform.py
-```
-
-Open `http://localhost:8000` in your browser.
-
-Optional, for a Vite dev server during active UI development:
-
-```bash
+python -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 cd frontend
-npm run dev
+npm ci
+npm run build
+cd ..
+.venv/bin/python -m uvicorn server:app --host 0.0.0.0 --port 8000
 ```
 
-## API Endpoints
+The backend serves the built frontend. For UI development, run `npm run dev` in `frontend` alongside the backend; Vite proxies `/api` to port 8000.
+
+```bash
+.venv/bin/python -m pytest -q
+cd frontend
+npm run build
+```
+
+Configure credentials in environment settings or an ignored local `.env`. Search needs `SERPER_API_KEY`; source-linked model extraction needs at least one of `GEMINI_API_KEY`, `GROQ_API_KEY`, or `OPENAI_API_KEY`. No credentials are needed for the offline test suite. Without provider access, the application can start and report unavailable evidence, but cannot produce a complete assessment.
+
+## Evidence and scoring
+
+- Web results retain full URLs, excerpts, retrieval timestamps, publication dates and source identifiers. Extraction uses batches of records rather than an 800-character evidence cutoff.
+- Model-proposed quotations must occur in a supplied record. Unsubstantiated citations are rejected. An unsupported event date stays unknown and does not enter scoring. A valid citation does not establish that the publisher's claim is true: analyst verification is still required.
+- Name matches from OFAC and product/domain matches from cyber feeds are candidates, not confirmed sanctions or compromise. User concerns guide extraction; they are never evidence.
+- Registry discovery is separate from verification. A fetched government registry record must match the normalized legal name and an identifying number; a supplied BN must also match. Conflicting records require confirmation.
+- Provisional event points are Low 0, Elevated 15, High 35 and Critical 75, capped at 100 per dimension. Recent reputation events use the configured 12-month multiplier; resolved events receive a 0.5 multiplier. Each contribution is exported. Unknown severity, date, identity or provenance cannot contribute.
+- Empty findings remain empty. Dimension scores without qualifying evidence are `null`; they do not default to Low. Source availability is shown as successful checks / total checks, not a fabricated probability of correctness.
+- Up to three annual periods from available yfinance statements include fiscal dates, six ratios and provenance. Two-year signals require adjacent fiscal periods. Quote and aggregator data do not verify audited statements or auditor opinions.
+
+## Assessment and review workflow
+
+Submit an analysis, monitor its real processing stage, then review the saved run and its evidence. The UI supports an API key held in memory, province/territory input, reassessment, cancellation, resuming a persisted job, a review queue, reviewer notes/history, source health and administrator settings.
+
+Assessment `run_status` may be `out_of_scope`, `paused_source_unavailable`, `awaiting_entity_confirmation`, `insufficient_evidence` or `awaiting_review`. Job execution status is separate: `pending`, `running`, `needs_review`, `complete`, `failed` or `cancelled`. Finishing collection does not approve a vendor.
+
+Reviews are append-only records. `reviewed` records an observation; `approve` is rejected while evidence or policy blockers remain. The current implementation always includes the missing CFG-VDD-001 approval blocker. Importing/approving that policy requires a separately reviewed implementation, not an administrator toggle.
+
+Reports carry a unique run ID. Their content hash and tenant ownership must match the stored run. Reviews do not silently rewrite an exported assessment. Refresh bypasses the assessment cache; individual source caches use their own TTLs and retain retrieval timestamps. Cancellation takes effect at pipeline checkpoints; an external request already in progress may finish first.
+
+## API
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/api/jobs` | **Recommended for integration.** Returns `job_id` immediately (202); the pipeline runs in the background. A duplicate submission (same vendor + params) while one is already pending/running returns the existing `job_id` instead of duplicating work. |
-| `GET` | `/api/jobs/{job_id}` | Poll for status/result. 404 once the job's `JOB_RETENTION_SECONDS` window has elapsed. |
-| `POST` | `/api/analyze` | Blocking variant of the same pipeline — observed live anywhere from ~90s to 15+ minutes depending on upstream LLM/search latency. Prefer `/api/jobs` for anything embedded or automated. |
-| `POST` | `/api/download-pdf` | Streams the SK-VDD-001 PDF report for a given result (reuses an eagerly-generated one when available). |
-| `GET` | `/api/health` | Service/config status — which AI providers and state backend are active. |
-| `GET` | `/api/presets` | Pre-configured enterprise targets. |
-| `POST` | `/api/normalize` | Vendor-name normalization utility (suffix stripping, acronym expansion). |
+| GET | `/api/health` | Configuration presence and state backend |
+| GET | `/api/presets` | Example inputs; no automatic assessment |
+| POST | `/api/normalize` | Normalize a vendor name |
+| POST | `/api/jobs` | Submit an assessment and receive a poll URL |
+| GET | `/api/jobs/{job_id}` | Read an owned job and result |
+| POST | `/api/jobs/{job_id}/cancel` | Request cancellation |
+| POST | `/api/analyze` | Blocking analysis; jobs are preferred |
+| POST | `/api/download-pdf` | Export the exact saved assessment |
+| GET | `/api/reviews` | Owned assessment review queue |
+| GET | `/api/runs/{run_id}` | Original assessment JSON |
+| GET / POST | `/api/runs/{run_id}/reviews` | Read history / record a review |
+| GET / PUT | `/api/admin/settings` | Read / save bounded policy parameters |
 
-Authentication is optional and off by default (local-dev convenience). Set `API_KEYS_JSON` (or the
-legacy single-key `API_KEY`) to require an `X-API-Key` header, with each key independently
-identifiable and independently daily-quota-capped. State (job records, analysis cache, rate-limit
-counters) lives in-process by default; set `REDIS_URL` to share it across replicas and survive a
-restart — see `store.py`.
+Administrator parameter changes apply on restart, before job recovery. Existing reports retain their original results. API documentation is served at `/docs`.
 
-## Automatic Escalation Triggers (Section 10.1)
+## Persistence, access and deployment
 
-The platform automatically flags senior risk review escalations for:
-
-- Overall Vendor Risk Score ≥ 75 (Critical rating)
-- Match on OFAC / OSFI / UN / EU sanctions list
-- Going-concern opinion in audited statements
-- Confirmed data breach within the configured lookback window
-- Active regulatory prohibition or cease-and-desist order
-- 2+ named executives showing departure language in evidence (key-person attrition)
-- Multiple distinct entities matching the supplied vendor name (disambiguation required)
-- Jurisdiction unconfirmed against Corporations Canada / a provincial registry
-
-Each LLM-sourced trigger above (sanctions match, breach, prohibition order, attrition) is backed by
-a deterministic check in `ai_engine.py` that only ever clears the flag, never sets it — the model's
-own claim isn't enough on its own to fire a client-facing escalation; it must be corroborated by a
-specific, severity-tagged, sourced finding in the same response.
-
-## Tech Stack
-
-| Layer | Technology |
+| Variable | Behavior |
 |---|---|
-| UI | React 18 + Tailwind CSS + Recharts |
-| Backend | FastAPI |
-| AI Model | Gemini → Groq → OpenAI auto-failover (dynamic model discovery) |
-| Web Search | Serper API |
-| Financial Data | yfinance (listed) / web scrape (private) |
-| Charts | Recharts |
-| PDF Export | ReportLab (two-pass canvas for page numbering) |
-| Parallelism | `concurrent.futures.ThreadPoolExecutor` |
+| `STATE_DB_PATH` | SQLite state path, default `.state/vendor.sqlite3`; use a persistent volume for a single instance. |
+| `REDIS_URL` | Optional shared store for jobs, reports, leases and quota counters. Configured Redis failure prevents startup; there is no silent memory fallback. Configure Redis persistence/backups separately. |
+| `MAX_CONCURRENT_JOBS` | Bounded async worker count, default 2 per process. |
+| `API_KEYS_JSON` | Map keys to `{ "client": "tenant-name", "role": "viewer|reviewer|admin", "daily_quota": 20 }`. Keys with the same client share a tenant's runs. |
+| `API_KEY` | Legacy single key; use the JSON configuration for reviewer/admin roles. |
+| `ALLOWED_ORIGINS` | Explicit CORS origins. |
+| `CALLBACK_ALLOWED_HOSTS` | Exact allowed public HTTPS callback hosts; callbacks disabled when empty. |
+| `CACHE_TTL_SECONDS` | Assessment/source cache TTL. |
 
-## Requirements
+When no API keys are configured, local development mode permits unauthenticated access, including administration. On Render, review decisions and administrator settings require configured reviewer/admin keys even when the public demo has no authentication. Configure authentication before shared deployment. Quotas are charged for analysis submissions, not polling/reviews/downloads. Without Redis, quota counters are process-local while SQLite preserves assessment state. Use Redis for shared state and quotas across replicas.
 
-```
-groq
-reportlab
-yfinance
-requests
-python-dotenv
-fastapi
-uvicorn
-```
+Persisted queued/running jobs are recovered on startup and execute under renewable leases. Recovery may repeat external retrieval after a process crash; it is not an exactly-once external task system. Reports, review records and jobs are retained without automatic deletion; define a retention/backup policy for production. `JOB_RETENTION_SECONDS` remains a legacy setting and does not expire audit records.
 
-## Environment Variables
+A Render filesystem without a persistent disk is ephemeral: local SQLite cannot survive machine replacement. Configure a persistent disk or durable Redis before relying on recovery across redeployments. Source fixes in this checkout do not deploy themselves to Render.
 
-| Variable | Required | Description |
-|---|---|---|
-| `GEMINI_API_KEY` | Recommended | Google Gemini API key — first in the LLM auto-failover chain |
-| `GROQ_API_KEY` | ✅ | Groq API key for LLM inference (fallback if Gemini unavailable) |
-| `SERPER_API_KEY` | ✅ | Serper API key for web search grounding |
-| `OPENAI_API_KEY` | Optional | Final fallback in the LLM auto-failover chain |
-| `REDIS_URL` | Optional | Shared/durable state backend for job records, analysis cache, and rate limits (e.g. `redis://localhost:6379/0`). Unset = in-memory, single-process only. An unreachable Redis logs a warning and falls back to in-memory rather than crashing. |
-| `API_KEYS_JSON` | Optional | `{"<key>": {"client": "<name>", "daily_quota": <int or null>}, ...}` — per-client API key auth with independent quotas. Unset = auth disabled. |
-| `API_KEY` | Optional | Legacy single shared-secret key, used only if `API_KEYS_JSON` is unset. |
-| `JOB_RETENTION_SECONDS` | Optional | How long a completed `/api/jobs` record stays pollable before eviction. Default 3600. |
-| `REFINITIV_API_KEY` / `DNB_API_KEY` / `FACTIVA_API_KEY` / `WORLDCHECK_API_KEY` / `BITSIGHT_API_KEY` / `SHODAN_API_KEY` / `HIBP_API_KEY` | Optional, unconfigured by default | Licensed data sources (see Known Limitations). Each one set removes its corresponding entry from the report's data-gaps disclosure and from the confidence-score deduction. |
+## Remaining limits
 
-## Notes
+- **Scoring policy:** CFG-VDD-001 has not been provided/approved. Provisional weights and rules are not a certified policy implementation; no calibrated confidence percentage is claimed.
+- **Source access:** there is no licensed-provider access in this environment. BitSight, World-Check, Refinitiv, D&B, Factiva and Shodan metadata do not constitute working connectors; adding a key does not remove their disclosure. HIBP has a request path, but its public breach catalog is not organization-wide email exposure monitoring.
+- **Incomplete public coverage:** OFAC is the direct sanctions integration; full Canadian/UN/EU lists, comprehensive PEP/alias/identity resolution, direct CRA tax-status verification and full SEDI coverage remain additional integration work. Unknown coverage is not a clean result.
+- **Filing verification:** SEDAR+/CanLII discovery is search-index based. A successful index query is not proof of direct filing retrieval, a verified auditor opinion or complete litigation coverage. Registry parsers may require manual verification when pages are dynamic, gated or change format. Three years of audited financial statements still require document ingestion and review.
+- **Human verification:** source-linked extraction can misinterpret a real quotation, and public reports can be inaccurate. Independent analyst review is required, particularly for entity matching, event classification and current legal status. The UI records review decisions; it does not replace a regulated approval process.
+- **Additional workflow:** assigned-reviewer routing, external notifications, scheduled reassessments and event subscriptions are not implemented. The saved review queue and source-health view support manual follow-up.
+- **Live validation:** offline regression tests and local HTTP/PDF checks do not establish live provider availability or behavior of the deployed Render site. The workspace proxy blocked access to the supplied public demo during the audit.
 
-- PDF reports are generated locally and not committed (see `.gitignore`)
-- The SSL adapter in `scraper.py` and `financial_fetcher.py` handles Windows SSL EOF errors
-- Data confidence score (30–98%) starts from evidence hit count + whether financial metrics were found, then deducts for this run's actual lookup failures (registry/profile/search grounding, capped at -20) and for the count of unconfigured licensed sources (capped at -7) — see `services.compute_confidence_score`
-- Search grounding integrity: a quota-exhausted or misconfigured `SERPER_API_KEY` is surfaced explicitly in the API response (`search_grounding.available`) and as the first `data_gaps` entry — it never silently looks identical to "searched and found nothing" (Section 10.2)
+## Main implementation modules
 
-## Known Limitations
-
-- **LLM output is inherently non-deterministic.** Every dimension's findings and score come from a model given a strict JSON schema to fill, and it can still deviate — duplicated entries, off-list values, a claim unsupported by its own listed evidence. `ai_engine.py` runs a layer of deterministic backstops after every LLM call (score-vs-evidence clamping, duplicate/authority normalization, and validators that can only ever clear an escalation flag, never set one) that catch every failure pattern observed in testing so far — but a model swap or unusual evidence could still surface a new one. Treat this as substantially mitigated, not eliminated.
-- **Response time depends on free-tier AI quota.** A single analysis has been observed taking anywhere from ~90 seconds to 15+ minutes depending on upstream Groq/Gemini rate limits that day. `/api/jobs` exists specifically so a caller doesn't have to hold a connection open for this.
-- **Seven licensed data sources are unconfigured by default**: Refinitiv/Bloomberg, Dun & Bradstreet, Factiva/LexisNexis, World-Check, BitSight, Shodan, and HaveIBeenPwned all require a paid key the platform doesn't ship with. Every report discloses exactly which ones are missing and from which dimension (Section 9.2), and the confidence score reflects it — but financial ratings, structured adverse-media sentiment, PEP/sanctions screening, and continuous security-posture scoring are all working from free public alternatives until these are configured.
-- **Regulatory framework alignment is narrow by design**: only 4 named frameworks (OSFI Corporate Governance Guideline, OSFI Guideline E-13, FINTRAC Guidance, OPC/PIPEDA Guidelines), covering 2 of the 5 risk dimensions (key-person, compliance). It is explicitly not a comprehensive legal/regulatory audit, and the PDF report states this plainly.
-- **Canada-only scope.** A vendor that can't be confirmed as Canadian-registered against Corporations Canada or a provincial registry is flagged out-of-scope rather than analyzed as if it were in scope.
-- **In-memory state by default.** Without `REDIS_URL` set, a backend restart drops any in-progress or cached job, and state isn't shared across multiple replicas.
-- **Never fully autonomous, by design.** Per Section 9.3, the platform does not approve or reject a vendor — every report ends with a human sign-off section. This is a deliberate constraint given the limitation above, not a missing feature.
+`analysis_pipeline.py` validates extracted evidence; `evidence.py` handles dates and provisional contributions; `services.py` applies completion gates. `financial_history.py` computes dated annual ratios. `registry_verification.py` distinguishes records from search hits. `server.py`, `job_runner.py`, `store.py` and `review_api.py` implement jobs, saved reports, access and review. `pdf_generator.py` and `frontend/src` display the same saved assessment.
 
 ## License
 

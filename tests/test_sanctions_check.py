@@ -19,6 +19,8 @@ def fake_sdn_cache(monkeypatch):
     """Ensure every test in this file uses a fixed fake list, never the network."""
     monkeypatch.setitem(sc._SDN_CACHE, "rows", FAKE_SDN_ROWS)
     monkeypatch.setitem(sc._SDN_CACHE, "fetched_at", "2026-01-01T00:00:00Z")
+    monkeypatch.setitem(sc._SDN_CACHE, "fetched_at", sc._now_iso())
+    monkeypatch.setitem(sc._SDN_CACHE, "status", "success")
     yield
     sc._SDN_CACHE["rows"] = None
 

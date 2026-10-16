@@ -10,6 +10,7 @@ All calls are defensive — never raises; returns empty dict on any failure.
 """
 
 import re
+from evidence import now_utc
 from datetime import datetime
 from financial_fetcher import _serper, _webpage
 import config
@@ -56,6 +57,7 @@ def search_litigation(vendor: str) -> dict:
     """Search CanLII for litigation involving the vendor."""
     results = {"cases": [], "total": 0, "source": "CanLII (canlii.org)"}
     try:
+        statuses = []
         years_clause = " OR ".join(str(y) for y in range(_MIN_LOOKBACK_YEAR, datetime.utcnow().year + 1))
         queries = [
             f'"{vendor}" site:canlii.org (lawsuit OR litigation OR "class action" OR "court" OR "tribunal") {years_clause}',
@@ -65,12 +67,16 @@ def search_litigation(vendor: str) -> dict:
         hits = []
         seen_urls = set()
         for q in queries:
-            for h in _serper(q, 8):
+            hits_for_query = _serper(q, 8)
+            statuses.append(getattr(hits_for_query, 'query_status', 'unknown'))
+            for h in hits_for_query:
                 url = h.get("link", "")
                 if url and url not in seen_urls and "canlii.org" in url:
                     seen_urls.add(url)
                     hits.append(h)
 
+        results['query_status'] = 'failed' if any(s not in ('success', 'no_matches') for s in statuses) else 'success' if hits else 'no_matches'
+        results['retrieved_at'] = now_utc().isoformat()
         if not hits:
             _safe_print(f"  [~] CanLII: no litigation results for {vendor}")
             return results

@@ -194,8 +194,9 @@ class TestGetJob:
 
 class TestWebhookCallback:
     def test_callback_url_receives_completed_job(self, monkeypatch):
+        monkeypatch.setattr(server, 'public_https_url', lambda url, hosts: url)
         received = []
-        monkeypatch.setattr(server.requests, "post", lambda url, json, timeout: received.append((url, json)))
+        monkeypatch.setattr(server.requests, "post", lambda url, json, timeout, **kwargs: received.append((url, json)))
 
         r = client.post("/api/jobs", json={"vendor": "Test Vendor", "callback_url": "https://example.com/hook"})
         job_id = r.json()["job_id"]
@@ -212,6 +213,7 @@ class TestWebhookCallback:
         assert payload["status"] == "complete"
 
     def test_webhook_failure_does_not_affect_job_status(self, monkeypatch):
+        monkeypatch.setattr(server, 'public_https_url', lambda url, hosts: url)
         def broken_post(*a, **k):
             raise ConnectionError("dns failure")
 

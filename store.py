@@ -1,30 +1,17 @@
-"""
-store.py - Persistent state backends for server.py
-----------------------------------------------------
-server.py previously kept the analysis cache, job store, and rate limiter
-as plain in-process dicts. That's fine for a single instance, but breaks
-the moment this is deployed behind more than one replica (each replica has
-its own, different cache/job-list/rate-limit state) or the process
-restarts (everything - including in-flight job records - is silently
-dropped).
+"""Persistent JSON stores and rate limiters.
 
-This module provides the same two primitives server.py actually needs
-(a JSON key-value store with TTL, and a sliding-window counter) behind a
-small interface, with two implementations:
-- InMemory*: today's behavior, unchanged, still the default with no config.
-- Redis*: backed by a real Redis instance (REDIS_URL), so state survives a
-  restart and is shared correctly across replicas.
-
-create_stores() picks one based on config.REDIS_URL, and falls back to
-in-memory (with a logged warning, not a crash) if Redis is configured but
-unreachable at startup - a broken cache backend shouldn't take the whole
-service down.
+SQLite persists single-machine jobs/reports; Redis shares state and quotas across
+replicas. In-memory implementations support isolated tests. Configured Redis
+failure stops startup rather than silently switching to a different store.
 """
 
 import json
 import time
 import threading
 import uuid
+import sqlite3
+import os
+from contextlib import contextmanager
 from typing import Optional
 
 import config
@@ -43,6 +30,9 @@ def _safe_print(msg: str):
 # ─── Key-value store (analysis cache, job records, PDF index) ────────────────
 
 class KVStore:
+    def keys(self, prefix):
+        raise NotImplementedError
+
     def get_json(self, key: str) -> Optional[dict]:
         raise NotImplementedError
 
@@ -69,6 +59,25 @@ class KVStore:
 
 
 class InMemoryKVStore(KVStore):
+    def renew_claim(self, key, value, ttl_seconds):
+        with self._lock:
+            entry = self._data.get(key)
+            if not entry or json.loads(entry[0]) != value or (entry[1] and entry[1] <= time.time()):
+                return False
+            self._data[key] = (entry[0], time.time() + ttl_seconds)
+            return True
+
+    def release_claim(self, key, value):
+        with self._lock:
+            entry = self._data.get(key)
+            if entry and json.loads(entry[0]) == value:
+                del self._data[key]
+
+    def keys(self, prefix):
+        with self._lock:
+            keys = [key for key in self._data if key.startswith(prefix)]
+        return [key for key in keys if self.get_json(key) is not None]
+
     """Stores each value as its JSON-serialized string, deserializing fresh
     on every get_json - not a dict-of-references. Deliberately matches
     RedisKVStore's actual behavior (Redis always hands back a freshly
@@ -123,6 +132,32 @@ class InMemoryKVStore(KVStore):
 class RedisKVStore(KVStore):
     def __init__(self, client):
         self._r = client
+
+    def keys(self, prefix):
+        return list(self._r.scan_iter(match=prefix + '*', count=100))
+
+    def _change_claim(self, key, value, ttl_seconds=None):
+        from redis.exceptions import WatchError
+        with self._r.pipeline() as pipe:
+            try:
+                pipe.watch(key)
+                if pipe.get(key) != json.dumps(value):
+                    return False
+                pipe.multi()
+                if ttl_seconds is None:
+                    pipe.delete(key)
+                else:
+                    pipe.expire(key, max(1, int(ttl_seconds)))
+                pipe.execute()
+                return True
+            except WatchError:
+                return False
+
+    def renew_claim(self, key, value, ttl_seconds):
+        return self._change_claim(key, value, ttl_seconds)
+
+    def release_claim(self, key, value):
+        return self._change_claim(key, value)
 
     def get_json(self, key):
         raw = self._r.get(key)
@@ -212,11 +247,65 @@ class RedisRateLimiter(RateLimiter):
 
 # ─── Backend selection ────────────────────────────────────────────────────
 
+class SQLiteKVStore(KVStore):
+    """Durable single-machine state. Redis remains the multi-replica backend."""
+    def __init__(self, path):
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        self.path = path
+        with self._connect() as db:
+            db.execute('PRAGMA journal_mode=WAL')
+            db.execute('CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, expires REAL)')
+
+    @contextmanager
+    def _connect(self):
+        db = sqlite3.connect(self.path, timeout=30)
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
+
+    def get_json(self, key):
+        with self._connect() as db:
+            row = db.execute('SELECT value FROM kv WHERE key=? AND (expires IS NULL OR expires>?)', (key, time.time())).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def set_json(self, key, value, ttl_seconds=None):
+        with self._connect() as db:
+            db.execute('INSERT OR REPLACE INTO kv VALUES(?,?,?)',
+                       (key, json.dumps(value), time.time() + ttl_seconds if ttl_seconds else None))
+
+    def delete(self, key):
+        with self._connect() as db:
+            db.execute('DELETE FROM kv WHERE key=?', (key,))
+
+    def try_claim(self, key, value, ttl_seconds=None):
+        with self._connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute('DELETE FROM kv WHERE key=? AND expires<=?', (key, time.time()))
+            cursor = db.execute('INSERT OR IGNORE INTO kv VALUES(?,?,?)',
+                                (key, json.dumps(value), time.time() + ttl_seconds if ttl_seconds else None))
+            return cursor.rowcount == 1
+
+    def keys(self, prefix):
+        with self._connect() as db:
+            rows = db.execute('SELECT key FROM kv WHERE substr(key,1,?)=? AND (expires IS NULL OR expires>?)',
+                              (len(prefix), prefix, time.time())).fetchall()
+        return [row[0] for row in rows]
+
+    def renew_claim(self, key, value, ttl_seconds):
+        with self._connect() as db:
+            cursor = db.execute('UPDATE kv SET expires=? WHERE key=? AND value=? AND expires>?',
+                                (time.time() + ttl_seconds, key, json.dumps(value), time.time()))
+            return cursor.rowcount == 1
+
+    def release_claim(self, key, value):
+        with self._connect() as db:
+            db.execute('DELETE FROM kv WHERE key=? AND value=?', (key, json.dumps(value)))
+
+
 def create_stores():
-    """Returns (kv_store, rate_limiter). Falls back to in-memory - logging
-    why, not raising - whenever REDIS_URL is unset or Redis is unreachable
-    at startup, so a misconfigured/down cache backend degrades this to
-    single-instance behavior instead of taking the whole service down."""
+    """Use configured Redis or local SQLite; never silently discard configured shared state."""
     if config.REDIS_URL:
         try:
             import redis
@@ -225,9 +314,8 @@ def create_stores():
                 socket_connect_timeout=5, socket_timeout=5,
             )
             client.ping()
-            _safe_print(f"[store] Connected to Redis ({config.REDIS_URL}) - state is shared and persistent.")
+            _safe_print('[store] Connected to Redis; shared state enabled.')
             return RedisKVStore(client), RedisRateLimiter(client)
         except Exception as e:
-            _safe_print(f"[store] REDIS_URL is set but Redis is unreachable ({e}) - "
-                        f"falling back to in-memory state (single-instance only).")
-    return InMemoryKVStore(), InMemoryRateLimiter()
+            raise RuntimeError('Configured Redis is unavailable. Refusing to silently switch state backends.') from None
+    return SQLiteKVStore(config.STATE_DB_PATH), InMemoryRateLimiter()

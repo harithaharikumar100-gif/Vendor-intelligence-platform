@@ -23,19 +23,25 @@ import time
 import uuid
 import base64
 import threading
+import hashlib
+import tempfile
+import re
+from concurrent.futures import ThreadPoolExecutor
+from network_safety import public_https_url
 import requests
 from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Response, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, Dict, Any, List
 
 from services import get_vendor_analysis
 from normalizer import normalize_vendor_name
 from pdf_generator import generate_pdf
-from store import create_stores, RedisKVStore
+from store import create_stores, RedisKVStore, SQLiteKVStore
+from job_runner import JobRunner
 import config
 
 
@@ -104,7 +110,7 @@ def _check_rate_limit(client_ip: str):
         )
 
 
-def require_api_key(x_api_key: str = Header(default="")) -> Optional[dict]:
+def require_api_key(request: Request, x_api_key: str = Header(default="")) -> Optional[dict]:
     """No-op (returns None, no auth enforced) when config.API_KEYS is empty
     - preserves the local-dev default. When configured, validates the key
     AND enforces its per-client daily quota (a cost-control budget per
@@ -120,12 +126,12 @@ def require_api_key(x_api_key: str = Header(default="")) -> Optional[dict]:
     if client_info is None:
         raise HTTPException(status_code=401, detail="Missing or invalid X-API-Key header.")
     quota = client_info.get("daily_quota")
-    if quota and not RATE_LIMITER.hit(f"quota:{x_api_key}", 86400, quota):
+    if quota and request.method == "POST" and request.url.path in ("/api/jobs", "/api/analyze") and not RATE_LIMITER.hit(f"quota:{x_api_key}", 86400, quota):
         raise HTTPException(
             status_code=429,
             detail=f"Daily quota exceeded for this API key ({quota}/day). Resets on a rolling 24h window."
         )
-    return client_info
+    return dict(client_info, owner=client_info.get("client") or hashlib.sha256(x_api_key.encode()).hexdigest())
 
 # Pre-configured enterprise targets (Canadian & Global)
 PRESETS = [
@@ -205,7 +211,7 @@ PRESETS = [
 
 
 class AnalyzeRequest(BaseModel):
-    vendor: str = Field(..., description="Legal or trade name to analyze, e.g. 'Shopify Inc.'. Required.", examples=["Shopify Inc."])
+    vendor: str = Field(..., max_length=250, description="Legal or trade name to analyze, e.g. 'Shopify Inc.'. Required.", examples=["Shopify Inc."])
     # Section 4.1: "NIVETA shall not assume any additional context beyond
     # what is explicitly provided." Defaulting to a specific named industry
     # (the old default was "Technology & SaaS") isn't just cosmetically
@@ -214,8 +220,10 @@ class AnalyzeRequest(BaseModel):
     # risk score. Empty here lets services.py/ai_engine.py's existing
     # neutral fallback ("General Commercial Services") actually apply.
     industry: Optional[str] = Field("", description="Known industry, if any. Left blank rather than guessed - an assumed industry biases the cyber-risk heuristic.")
+    province: str = Field("", max_length=100)
+    refresh: bool = False
     country: Optional[str] = Field("Canada", description="Registration/operating jurisdiction.")
-    concerns: Optional[str] = Field("", description="Free-text specific concerns to focus the analysis on, if any.")
+    concerns: Optional[str] = Field("", max_length=5000, description="Free-text specific concerns to focus the analysis on, if any.")
     company_url: Optional[str] = Field("", description="Corporate website, if known - improves profile/domain-based lookups.")
     business_number: Optional[str] = Field("", description="9-digit CRA Business Number, if known.")
     ticker: Optional[str] = Field("", description="Stock ticker, if publicly traded - skips ticker discovery and improves yfinance accuracy.")
@@ -240,6 +248,7 @@ class PdfRequest(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str
+    deployment_commit: Optional[str] = None
     groq_configured: bool
     gemini_configured: bool
     openai_configured: bool
@@ -281,12 +290,14 @@ class JobRecord(BaseModel):
                            "pipeline's dimensions and is large; treat it as a JSON object rather than a fixed schema."
     )
     error: Optional[str] = Field(None, description="Failure detail once status is 'failed'.")
+    stage: Optional[str] = None
 
 
 @app.get("/api/health", response_model=HealthResponse, tags=["Meta"], summary="Service and configuration status")
 def health():
     return {
         "status": "healthy",
+        "deployment_commit": os.getenv('RENDER_GIT_COMMIT') or None,
         "groq_configured": bool(os.getenv("GROQ_API_KEY")),
         "gemini_configured": bool(os.getenv("GEMINI_API_KEY")),
         "openai_configured": bool(os.getenv("OPENAI_API_KEY")),
@@ -296,7 +307,7 @@ def health():
         # not - see store.py. Surfaced here so an operator can tell at a
         # glance whether this instance is safe to run behind more than one
         # replica without it, rather than discovering it the hard way.
-        "state_backend": "redis" if isinstance(KV_STORE, RedisKVStore) else "in-memory",
+        "state_backend": "redis" if isinstance(KV_STORE, RedisKVStore) else "sqlite" if isinstance(KV_STORE, SQLiteKVStore) else "in-memory",
         "api_key_auth_enabled": bool(config.API_KEYS),
         "skill_id": "SK-VDD-001",
         "platform": "DRiskify - NIVETA"
@@ -315,77 +326,65 @@ def normalize_input(data: Dict[str, str]):
     return normalize_vendor_name(vendor)
 
 
-def _cache_key_for(req: AnalyzeRequest, clean_name: str) -> str:
-    return f"{clean_name}__{req.country}__{req.industry}__{req.ticker}__{req.company_url}__{req.duns_number}__{req.naics_code}"
+def _owner(client_info):
+    return (client_info or {}).get('owner') or (client_info or {}).get('client') or 'local'
 
 
-def _run_analysis(req: AnalyzeRequest) -> dict:
-    """The actual SK-VDD-001 pipeline run, shared by the synchronous
-    /api/analyze endpoint and the async /api/jobs worker below. Raises
-    RuntimeError on failure rather than HTTPException - this runs from a
-    background thread for the job path, which isn't a FastAPI request
-    context, so HTTPException there would just be a confusingly-named plain
-    exception rather than doing anything HTTP-specific."""
-    norm = normalize_vendor_name(req.vendor)
-    clean_name = norm["normalized_name"]
+def _content_hash(result):
+    return hashlib.sha256(json.dumps(result, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
 
-    cache_key = _cache_key_for(req, clean_name)
-    cache_storage_key = f"analysis:{cache_key}"
-    # Expiry is handled by the store's own ttl_seconds (both backends) -
-    # a hit here is, by construction, within config.CACHE_TTL_SECONDS.
-    cached = KV_STORE.get_json(cache_storage_key)
+
+def _cache_key_for(req: AnalyzeRequest, clean_name: str, owner='local') -> str:
+    payload = req.model_dump(exclude={'callback_url', 'refresh'})
+    payload.update(owner=owner, normalized_vendor=clean_name, policy_version='provisional-v2',
+                   parameters={k: getattr(config, k) for k in (
+                       'LOOKBACK_MONTHS', 'RECENCY_MULTIPLIER_12M', 'CRITICAL_SCORE_THRESHOLD',
+                       'HIGH_SCORE_THRESHOLD', 'MIN_CVSS_SCORE', 'AMP_MATERIALITY_THRESHOLD_CAD',
+                       'MAX_NEWS_ARTICLES_LOGGED')})
+    return _content_hash(payload)
+
+
+def _render_pdf(result):
+    # Unique server-generated paths prevent vendor-controlled path traversal and concurrent file collisions.
+    with tempfile.TemporaryDirectory(prefix='driskify-report-') as directory:
+        path = os.path.join(directory, 'report.pdf')
+        generate_pdf(result, filename=path, vendor_name=result.get('vendor_name', 'Vendor'))
+        with open(path, 'rb') as report:
+            return report.read()
+
+
+def _run_analysis(req: AnalyzeRequest, owner='local', progress=None, state=None) -> dict:
+    state = state or KV_STORE
+    clean_name = normalize_vendor_name(req.vendor)['normalized_name']
+    key = _cache_key_for(req, clean_name, owner)
+    cached = state.get_json(f'analysis:{key}') if not req.refresh else None
     if cached:
-        _safe_print(f"[cache] Returning cached analysis for: {clean_name}")
-        return cached["result"]
-
-    result, raw_signals = get_vendor_analysis(
-        vendor=clean_name,
-        industry=req.industry or "",
-        country=req.country or "Canada",
-        concerns=req.concerns or "",
-        company_url=req.company_url or "",
-        business_number=req.business_number or "",
-        ticker=req.ticker or "",
-        duns_number=req.duns_number or "",
-        naics_code=req.naics_code or "",
-    )
-
-    if "error" in result and not result.get("risk_scores"):
-        raise RuntimeError(result["error"])
-
-    cache_entry = {"result": result}
-
-    # Section 11 auto_generate_pdf_report: previously defined but not wired to
-    # any behavior. Generating it eagerly here (instead of only on-demand in
-    # /api/download-pdf) both honors the flag and means the later download
-    # call can serve these bytes straight from cache instead of re-rendering.
+        return cached['result']
+    kwargs = req.model_dump(exclude={'callback_url', 'refresh'})
+    kwargs = {k: (v or '') for k, v in kwargs.items()}
+    kwargs['country'] = req.country or 'Canada'
+    if progress:
+        kwargs['progress'] = progress
+    result, _ = get_vendor_analysis(**kwargs)
+    if 'error' in result and not result.get('risk_scores'):
+        raise RuntimeError(result['error'])
+    result.setdefault('run_id', uuid.uuid4().hex)
+    result.setdefault('schema_version', '2.0')
+    result.setdefault('review_status', 'pending')
+    entry = {'result': result, 'owner': owner, 'content_hash': _content_hash(result)}
     if config.AUTO_GENERATE_PDF_REPORT:
         try:
-            _tmp_path = os.path.join(os.getcwd(), f"_autogen_{cache_key.__hash__() & 0xffffffff}.pdf")
-            generate_pdf(result, filename=_tmp_path, vendor_name=clean_name)
-            with open(_tmp_path, "rb") as f:
-                pdf_bytes = f.read()
-            os.remove(_tmp_path)
-            # bytes don't survive JSON encoding, so store them base64'd
-            # inside the same cache entry rather than adding a separate
-            # bytes-store primitive just for this one field.
-            cache_entry["pdf_bytes_b64"] = base64.b64encode(pdf_bytes).decode("ascii")
-            # Secondary index so _find_cached_pdf below can look this up by
-            # (vendor_name, query_date) in O(1) instead of scanning every
-            # cache entry - the latter only worked at all because the old
-            # in-memory dict was iterable; Redis has no efficient equivalent
-            # at scale, so an explicit index replaces the scan for both
-            # backends rather than only fixing it for one.
-            if result.get("vendor_name") and result.get("query_date"):
-                KV_STORE.set_json(
-                    f"pdf_index:{result['vendor_name']}:{result['query_date']}",
-                    {"cache_key": cache_key},
-                    ttl_seconds=config.CACHE_TTL_SECONDS,
-                )
-        except Exception as e:
-            _safe_print(f"[!] Auto-PDF generation failed for {clean_name}: {e}")
-
-    KV_STORE.set_json(cache_storage_key, cache_entry, ttl_seconds=config.CACHE_TTL_SECONDS)
+            entry['pdf_bytes_b64'] = base64.b64encode(_render_pdf(result)).decode('ascii')
+        except Exception:
+            result.setdefault('data_gaps', []).append('PDF generation failed; JSON retained. Retry PDF export.')
+            result['report_status'] = 'pdf_failed'
+            entry['content_hash'] = _content_hash(result)
+    # Immutable run records keep older reports and review history addressable independently of analysis cache.
+    if progress:
+        progress('saving_report')
+    state.set_json(f'run:{result["run_id"]}', entry)
+    if result.get('run_status') in (None, 'complete', 'awaiting_review') and result.get('report_status') != 'pdf_failed':
+        state.set_json(f'analysis:{key}', entry, ttl_seconds=config.CACHE_TTL_SECONDS)
     return result
 
 
@@ -398,14 +397,14 @@ def _run_analysis(req: AnalyzeRequest) -> dict:
                  "a JobRecord's `result` field) - not strictly typed here as it's large and has grown "
                  "organically across the pipeline's dimensions.",
 )
-def analyze_vendor(req: AnalyzeRequest, request: Request):
+def analyze_vendor(req: AnalyzeRequest, request: Request, client_info: Optional[dict] = Depends(require_api_key)):
     if not req.vendor or not req.vendor.strip():
         raise HTTPException(status_code=400, detail="Vendor name is required.")
 
     _check_rate_limit(request.client.host if request.client else "unknown")
 
     try:
-        return _run_analysis(req)
+        return _run_analysis(req, _owner(client_info))
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -448,30 +447,72 @@ class JobSubmitResponse(BaseModel):
 
 def _send_webhook(callback_url: str, job: dict):
     try:
-        requests.post(callback_url, json=job, timeout=10)
-    except Exception as e:
-        _safe_print(f"[!] Job {job['job_id']}: callback to {callback_url} failed: {e}")
+        public_https_url(callback_url, config.CALLBACK_ALLOWED_HOSTS)
+        requests.post(callback_url, json=job, timeout=10, allow_redirects=False)
+    except Exception:
+        _safe_print(f"[!] Job {job['job_id']}: callback delivery failed.")
 
 
-def _execute_job(job_id: str, req: AnalyzeRequest, cache_key: str, job: dict):
+def _execute_job(job_id: str, req: AnalyzeRequest, cache_key: str, job: dict, state=None, owns_lease=lambda: True):
+    state = state or KV_STORE
     job_key = f"job:{job_id}"
     job["status"] = "running"
     job["started_at"] = _now_iso()
-    KV_STORE.set_json(job_key, job, ttl_seconds=config.JOB_RETENTION_SECONDS)
+    state.set_json(job_key, job)
 
     try:
-        result = _run_analysis(req)
-        job["status"] = "complete"
+        def progress(stage):
+            if not owns_lease():
+                raise RuntimeError('Execution lease expired; another worker will resume this job.')
+            if state.get_json(f'cancel:{job_id}') or (state.get_json(job_key) or {}).get('cancel_requested'):
+                raise RuntimeError('Cancelled by reviewer.')
+            job['stage'] = stage
+            state.set_json(job_key, job)
+        result = _run_analysis(req, job.get('owner', 'local'), progress, state)
+        job["status"] = 'complete' if result.get('run_status') in (None, 'complete') else 'needs_review'
         job["result"] = result
     except Exception as e:
         job["status"] = "failed"
         job["error"] = str(e)
     finally:
+        if not owns_lease():
+            return
+        if state.get_json(f'cancel:{job_id}') or (state.get_json(job_key) or {}).get('cancel_requested'):
+            job['status'] = 'cancelled'
+            job['cancel_requested'] = True
         job["completed_at"] = _now_iso()
-        KV_STORE.set_json(job_key, job, ttl_seconds=config.JOB_RETENTION_SECONDS)
-        KV_STORE.delete(f"inflight:{cache_key}")
+        state.set_json(job_key, job)
+        state.delete(f"inflight:{cache_key}")
         if req.callback_url:
-            _send_webhook(req.callback_url, job)
+            _send_webhook(req.callback_url, JobRecord(**job).model_dump())
+
+
+_RUNNERS = {}
+_RUNNER_LOCK = threading.Lock()
+
+def _runner():
+    with _RUNNER_LOCK:
+        key = id(KV_STORE)
+        if key not in _RUNNERS:
+            def execute(job, state, owns_lease):
+                _execute_job(job['job_id'], AnalyzeRequest(**job['request']), job['cache_key'], job, state, owns_lease)
+            _RUNNERS[key] = JobRunner(KV_STORE, execute, config.MAX_CONCURRENT_JOBS)
+            _RUNNERS[key].start()
+        return _RUNNERS[key]
+
+
+@app.on_event('startup')
+def recover_jobs():
+    from review_api import apply_settings
+    apply_settings(sys.modules[__name__])
+    _runner()
+
+
+@app.on_event('shutdown')
+def close_workers():
+    for runner in list(_RUNNERS.values()):
+        runner.shutdown()
+    _RUNNERS.clear()
 
 
 @app.post(
@@ -490,7 +531,12 @@ def submit_job(req: AnalyzeRequest, request: Request, client_info: Optional[dict
     _check_rate_limit(request.client.host if request.client else "unknown")
 
     clean_name = normalize_vendor_name(req.vendor)["normalized_name"]
-    cache_key = _cache_key_for(req, clean_name)
+    if req.callback_url:
+        try:
+            public_https_url(req.callback_url, config.CALLBACK_ALLOWED_HOSTS)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error))
+    cache_key = _cache_key_for(req, clean_name, _owner(client_info))
     inflight_key = f"inflight:{cache_key}"
 
     job_id = uuid.uuid4().hex
@@ -512,15 +558,19 @@ def submit_job(req: AnalyzeRequest, request: Request, client_info: Optional[dict
         "status": "pending",
         "vendor": clean_name,
         "client": client_info.get("client") if client_info else None,
+        "owner": _owner(client_info),
+        "request": req.model_dump(),
+        "cache_key": cache_key,
+        "stage": "queued",
         "created_at": _now_iso(),
         "started_at": None,
         "completed_at": None,
         "result": None,
         "error": None,
     }
-    KV_STORE.set_json(f"job:{job_id}", job, ttl_seconds=config.JOB_RETENTION_SECONDS)
+    KV_STORE.set_json(f"job:{job_id}", job)
 
-    threading.Thread(target=_execute_job, args=(job_id, req, cache_key, job), daemon=True).start()
+    _runner().submit(job_id)
 
     return JobSubmitResponse(job_id=job_id, status="pending", poll_url=f"/api/jobs/{job_id}")
 
@@ -529,67 +579,47 @@ def submit_job(req: AnalyzeRequest, request: Request, client_info: Optional[dict
     "/api/jobs/{job_id}", dependencies=[Depends(require_api_key)], response_model=JobRecord, tags=["Jobs"],
     summary="Poll a job's status/result", responses={404: {"description": "Unknown or expired job_id."}},
 )
-def get_job(job_id: str):
+def get_job(job_id: str, client_info: Optional[dict] = Depends(require_api_key)):
     job = KV_STORE.get_json(f"job:{job_id}")
-    if job is None:
+    if job is None or job.get('owner', 'local') != _owner(client_info):
         raise HTTPException(status_code=404, detail="Unknown or expired job_id.")
     return job
 
 
-def _find_cached_pdf(result: dict):
-    """Match an incoming /api/download-pdf result back to an analysis cache
-    entry by (vendor_name, query_date) to reuse an eagerly-generated PDF
-    instead of re-rendering one that already exists. Looks up the
-    pdf_index:{vendor_name}:{query_date} entry _run_analysis writes rather
-    than scanning every cache entry - the old scan only worked because the
-    in-memory dict was iterable; Redis has no efficient equivalent to that
-    at scale, so this index replaces the scan for both backends."""
-    vendor_name = result.get("vendor_name")
-    query_date = result.get("query_date")
-    if not vendor_name or not query_date:
+def _find_cached_pdf(result: dict, owner='local'):
+    run_id = result.get('run_id')
+    if not run_id:
         return None
-    idx = KV_STORE.get_json(f"pdf_index:{vendor_name}:{query_date}")
-    if not idx:
+    entry = KV_STORE.get_json(f'run:{run_id}')
+    if not entry or entry.get('owner') != owner or entry.get('content_hash') != _content_hash(result):
         return None
-    entry = KV_STORE.get_json(f"analysis:{idx['cache_key']}")
-    if not entry or "pdf_bytes_b64" not in entry:
-        return None
-    return base64.b64decode(entry["pdf_bytes_b64"])
+    return base64.b64decode(entry['pdf_bytes_b64']) if entry.get('pdf_bytes_b64') else None
 
 
-@app.post(
-    "/api/download-pdf", dependencies=[Depends(require_api_key)], tags=["Reports"],
-    summary="Generate/download the SK-VDD-001 PDF report",
-    description="Reuses an eagerly-generated PDF from cache when the given result came from a recent "
-                 "/api/analyze or /api/jobs call with AUTO_GENERATE_PDF_REPORT enabled; otherwise renders "
-                 "on demand. Response is the raw PDF (application/pdf), not JSON.",
-    response_class=Response,
-)
-def download_pdf(req: PdfRequest):
+@app.post('/api/download-pdf', response_class=Response, tags=['Reports'])
+def download_pdf(req: PdfRequest, client_info: Optional[dict] = Depends(require_api_key)):
+    result = req.result
+    if result.get('run_id'):
+        entry = KV_STORE.get_json(f'run:{result["run_id"]}')
+        if not entry or entry.get('owner') != _owner(client_info):
+            raise HTTPException(status_code=404, detail='Unknown assessment.')
+        if entry['content_hash'] != _content_hash(result):
+            raise HTTPException(status_code=409, detail='Report content differs from its saved assessment. Reload the run.')
+    elif config.API_KEYS:
+        raise HTTPException(status_code=400, detail='A saved assessment run_id is required.')
     try:
-        vendor_name = req.vendor_name or req.result.get("vendor_name", "vendor")
-        clean_filename = f"DRiskify_SK_VDD_001_{vendor_name.lower().replace(' ', '_')}.pdf"
+        pdf = _find_cached_pdf(result, _owner(client_info)) or _render_pdf(result)
+        filename = re.sub(r'[^a-zA-Z0-9_-]', '_', str(result.get('vendor_name', 'vendor')))[:80]
+        return Response(content=pdf, media_type='application/pdf',
+                        headers={'Content-Disposition': f'attachment; filename="DRiskify_{filename}.pdf"'})
+    except Exception:
+        raise HTTPException(status_code=500, detail='PDF generation failed. The saved JSON remains available.')
 
-        pdf_bytes = _find_cached_pdf(req.result)
-        if pdf_bytes is None:
-            temp_pdf_path = os.path.join(os.getcwd(), clean_filename)
-            generate_pdf(req.result, filename=temp_pdf_path, vendor_name=vendor_name)
-            with open(temp_pdf_path, "rb") as f:
-                pdf_bytes = f.read()
-            if os.path.exists(temp_pdf_path):
-                try:
-                    os.remove(temp_pdf_path)
-                except Exception:
-                    pass
 
-        return Response(
-            content=pdf_bytes,
-            media_type="application/pdf",
-            headers={"Content-Disposition": f'attachment; filename="{clean_filename}"'}
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PDF compilation failed: {e}")
-
+# Register API routes before the static frontend catch-all.
+import sys
+from review_api import register
+register(app, sys.modules[__name__])
 
 # Serve frontend static build if present
 dist_path = os.path.join(os.getcwd(), "frontend", "dist")

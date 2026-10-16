@@ -44,7 +44,7 @@ LICENSED_SOURCES = {
         "env": "SHODAN_API_KEY",
         "dimensions": ["cyber"],
     },
-    "HaveIBeenPwned Domain Search API (requires paid API key as of HIBP v3)": {
+    "HaveIBeenPwned breach catalog (not organization email exposure monitoring)": {
         "env": "HIBP_API_KEY",
         "dimensions": ["cyber"],
     },
@@ -55,7 +55,7 @@ def is_configured(source_label: str) -> bool:
     meta = LICENSED_SOURCES.get(source_label)
     if not meta:
         return False
-    return bool(os.getenv(meta["env"], "").strip())
+    return meta["env"] == "HIBP_API_KEY" and bool(os.getenv(meta["env"], "").strip())
 
 
 def configured_sources() -> list:
@@ -72,8 +72,8 @@ def missing_sources_for_dimension(dimension: str) -> list:
 def data_gaps_for_dimension(dimension: str) -> list:
     """Section 8 data_gaps entries: sources that could not be accessed."""
     return [
-        f"{name} not licensed/configured (set {LICENSED_SOURCES[name]['env']}) — "
-        f"{dimension.replace('_', ' ')} dimension confidence reduced per SK-VDD-001 Section 9.2."
+        f"{name} not verified for this run; connector/access must be validated ({LICENSED_SOURCES[name]['env']}) — "
+        f"{dimension.replace('_', ' ')} coverage unavailable per SK-VDD-001 Section 9.2."
         for name in missing_sources_for_dimension(dimension)
     ]
 
@@ -90,7 +90,7 @@ def all_missing_data_gaps() -> list:
                 continue
             seen_dims.add(key)
             gaps.append(
-                f"{name} not licensed/configured (set {meta['env']}) — "
-                f"{dim.replace('_', ' ')} dimension confidence reduced per SK-VDD-001 Section 9.2."
+                f"{name} not verified for this run; connector/access must be validated — "
+                f"{dim.replace('_', ' ')} coverage unavailable per SK-VDD-001 Section 9.2."
             )
     return gaps

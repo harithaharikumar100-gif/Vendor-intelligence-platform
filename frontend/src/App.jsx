@@ -11,8 +11,16 @@ import RadarChart from './components/RadarChart';
 import DimensionCard from './components/DimensionCard';
 import EscalationBanner from './components/EscalationBanner';
 import SourceBadge from './components/SourceBadge';
+import ReviewPanel from './components/ReviewPanel';
+import FinancialHistory from './components/FinancialHistory';
 
 export default function App() {
+  const [apiKey, setApiKey] = useState('');
+  const [jobStage, setJobStage] = useState('');
+  const [jobId, setJobId] = useState(() => sessionStorage.getItem('vendorJobId') || '');
+  const pollController = useRef(null);
+  const apiFetch = (url, options = {}) => window.fetch(url, {...options, headers: {...options.headers, ...(apiKey ? {'X-API-Key': apiKey} : {})}});
+  useEffect(() => () => pollController.current?.abort(), []);
   const [vendorInput, setVendorInput] = useState('Shopify Inc.');
   const [industry, setIndustry] = useState('Technology & SaaS');
   const [country, setCountry] = useState('Canada');
@@ -22,6 +30,8 @@ export default function App() {
   const [dunsNumber, setDunsNumber] = useState('');
   const [naicsCode, setNaicsCode] = useState('');
   const [concerns, setConcerns] = useState('');
+  const [province, setProvince] = useState('');
+  const [refresh, setRefresh] = useState(false);
 
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -50,12 +60,12 @@ export default function App() {
     if (didInit.current) return;
     didInit.current = true;
 
-    fetch('/api/presets')
+    apiFetch('/api/presets')
       .then((res) => res.json())
       .then((data) => setPresets(data))
       .catch(() => {});
 
-    handleRunAnalysis('Shopify Inc.', 'Technology & SaaS', 'Canada', 'https://www.shopify.com', 'SHOP');
+
   }, []);
 
   useEffect(() => {
@@ -63,7 +73,7 @@ export default function App() {
       setNormalizedPreview('');
       return;
     }
-    fetch('/api/normalize', {
+    apiFetch('/api/normalize', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ vendor: vendorInput })
@@ -90,18 +100,19 @@ export default function App() {
   const MAX_CONSECUTIVE_POLL_ERRORS = 5;
 
   const pollJob = async (jobId) => {
+    pollController.current?.abort();
+    const controller = new AbortController();
+    pollController.current = controller;
+    const started = Date.now();
     let consecutiveErrors = 0;
-    // No overall wall-clock cap here by design - the backend's own
-    // per-dimension timeouts already bound how long a run can take, and a
-    // caller who navigates away simply stops polling (see the cleanup
-    // effect below); there's no scenario where polling forever is the
-    // wrong failure mode to fall into.
+    // Stop polling after thirty minutes; the persisted job can be resumed.
     // eslint-disable-next-line no-constant-condition
-    while (true) {
+    while (!controller.signal.aborted) {
+      if (Date.now() - started > 30 * 60 * 1000) throw new Error('This run is taking longer than expected. Use Resume to check it again.');
       await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
       let job;
       try {
-        const res = await fetch(`/api/jobs/${jobId}`);
+        const res = await apiFetch(`/api/jobs/${jobId}`, {signal: controller.signal});
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
           throw new Error(errData.detail || `Job status check failed (HTTP ${res.status}).`);
@@ -118,7 +129,9 @@ export default function App() {
         }
         continue;
       }
-      if (job.status === 'complete') return { data: job.result };
+      setJobStage(job.stage || job.status);
+      if (job.status === 'cancelled') throw new Error('Assessment cancelled.');
+      if (job.status === 'complete' || job.status === 'needs_review') return { data: job.result };
       if (job.status === 'failed') return { error: job.error || 'Due diligence analysis failed.' };
       // else "pending" or "running" - keep polling
     }
@@ -137,16 +150,10 @@ export default function App() {
     setError(null);
     setLoadingStep(1);
 
-    // Purely cosmetic "still working" progression, decoupled from actual
-    // job status - the four phases it names are real (and roughly in this
-    // order), but nothing here reads real backend state; that's what
-    // pollJob is for.
-    const stepInterval = setInterval(() => {
-      setLoadingStep((prev) => (prev < 4 ? prev + 1 : prev));
-    }, 1200);
+    setJobStage('queued');
 
     try {
-      const submitRes = await fetch('/api/jobs', {
+      const submitRes = await apiFetch('/api/jobs', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -159,6 +166,8 @@ export default function App() {
           duns_number: dunsNumber,
           naics_code: naicsCode,
           concerns: concerns,
+          province,
+          refresh,
         }),
       });
 
@@ -168,6 +177,8 @@ export default function App() {
       }
 
       const { job_id: jobId } = await submitRes.json();
+      setJobId(jobId);
+      sessionStorage.setItem('vendorJobId', jobId);
       const outcome = await pollJob(jobId);
 
       if (outcome.error) {
@@ -177,7 +188,7 @@ export default function App() {
     } catch (err) {
       setError(err.message);
     } finally {
-      clearInterval(stepInterval);
+
       setLoading(false);
       setLoadingStep(0);
     }
@@ -215,7 +226,7 @@ export default function App() {
   const handleDownloadPdf = async () => {
     if (!result) return;
     try {
-      const res = await fetch('/api/download-pdf', {
+      const res = await apiFetch('/api/download-pdf', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -264,9 +275,10 @@ export default function App() {
   // Score -> tier color, for highlighting the numbers that actually matter
   // (dimension scores, confidence) rather than leaving everything monochrome.
   const scoreTierColor = (s) => {
+    if (!Number.isFinite(s)) return 'text-ink-500';
     if (s <= 24) return 'text-tier-low';
-    if (s <= 49) return 'text-tier-medium';
-    if (s <= 74) return 'text-tier-high';
+    if (s < (result?.policy_parameters?.HIGH_SCORE_THRESHOLD ?? 50)) return 'text-tier-medium';
+    if (s < (result?.policy_parameters?.CRITICAL_SCORE_THRESHOLD ?? 75)) return 'text-tier-high';
     return 'text-tier-critical';
   };
 
@@ -315,6 +327,18 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-10 space-y-10">
+        <section className="panel p-4 my-4 flex flex-wrap items-center gap-3">
+          <label className="text-xs text-ink-400">Access key (if required)
+            <input type="password" autoComplete="off" value={apiKey} onChange={e => setApiKey(e.target.value)} className="ml-2 bg-surface border border-border rounded p-2" />
+          </label>
+          {jobId && <button className="text-xs text-accent-text" disabled={loading} onClick={async () => {
+            setLoading(true); setError(null);
+            try {const outcome = await pollJob(jobId); if (outcome?.error) throw new Error(outcome.error); if (outcome?.data) setResult(outcome.data);}
+            catch (e) {setError(e.message);} finally {setLoading(false);}
+          }}>Resume previous assessment</button>}
+          {loading && jobId && <button className="text-xs text-ink-400" onClick={() => apiFetch(`/api/jobs/${jobId}/cancel`, {method:'POST'})}>Cancel assessment</button>}
+        </section>
+
         {/* Search & Hero */}
         <section className="space-y-5 animate-fade-up">
           <div className="space-y-2.5">
@@ -393,6 +417,14 @@ export default function App() {
 
             {showAdvanced && (
               <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-5 gap-3 mt-3 p-4 border border-border rounded-lg text-xs">
+                <label className="text-ink-500">Province / territory
+                  <input value={province} onChange={e => setProvince(e.target.value)} maxLength={100} placeholder="e.g. Ontario"
+                    className="w-full mt-1 px-3 py-2 bg-surface-card border border-border rounded-md text-ink-200" />
+                </label>
+                <label className="text-ink-500 flex items-center gap-2">
+                  <input type="checkbox" checked={refresh} onChange={e => setRefresh(e.target.checked)} />
+                  Reassess instead of reusing a saved assessment (source caches retain their retrieval dates)
+                </label>
                 <div>
                   <label className="block text-ink-500 mb-1">Industry domain</label>
                   <input
@@ -456,7 +488,7 @@ export default function App() {
                 Gathering autonomous intelligence on {vendorInput}...
               </h3>
               <p className="text-xs text-ink-500 font-mono mt-1.5">
-                {loadingStep === 1 && '1/4 · Input normalisation & CBCA jurisdiction resolution'}
+                {jobStage.replaceAll('_', ' ')}
                 {loadingStep === 2 && '2/4 · Querying SEDAR+, Tier-1 Canadian media & CanLII'}
                 {loadingStep === 3 && '3/4 · Inspecting CCCS advisories, CISA KEV & OSFI/FINTRAC'}
                 {loadingStep >= 4 && '4/4 · Applying SK-VDD-001 signal taxonomy & AI synthesis'}
@@ -478,6 +510,11 @@ export default function App() {
           <div className="space-y-8 animate-fade-up">
             <EscalationBanner escalations={result.automatic_escalations} />
 
+            <div className="panel p-4 border border-amber-500/30 text-sm text-ink-300">
+              <strong>{(result.run_status || 'unverified').replaceAll('_', ' ')}</strong>
+              <p>Risk scores are provisional until evidence and scoring policy are reviewed. Source availability is not a probability of accuracy.</p>
+              {(result.completion_blockers || []).map(item => <p key={item}>{item}</p>)}
+            </div>
             {/* Executive Hero */}
             <div className="panel p-6 flex flex-col md:flex-row items-center justify-between gap-6 relative overflow-hidden shadow-panel">
               <span className={`absolute top-0 left-0 right-0 h-[2px] ${getTierColor(result.overall_risk_rating).replace('text-', 'bg-')}`} />
@@ -487,11 +524,11 @@ export default function App() {
                     {result.vendor_name || vendorInput}
                   </h2>
                   <span className={`text-xs font-medium uppercase tracking-wider ${getTierColor(result.overall_risk_rating)}`}>
-                    {result.overall_risk_rating} risk · {result.traffic_light}
+                    {Number.isFinite(result.overall_score) ? `${result.overall_risk_rating} · Provisional` : 'Assessment incomplete'}
                   </span>
                 </div>
                 <p className="text-xs text-ink-500">
-                  Jurisdiction: <span className="text-ink-200">{result.registration_country}</span> · Industry: <span className="text-ink-200">{result.company_profile?.industry || industry}</span> · Data confidence: <span className={`font-medium ${confidenceColor(result.confidence_score)}`}>{result.confidence_score}%</span> (36m horizon)
+                  Jurisdiction: <span className="text-ink-200">{result.registration_country}</span> · Industry: <span className="text-ink-200">{result.company_profile?.industry || industry}</span> · Source checks: {result.evidence_coverage?.successful_checks ?? 0}/{result.evidence_coverage?.total_checks ?? 0} ({result.lookback_months ?? 36}m horizon)
                 </p>
                 <p className="text-xs text-ink-300 pt-1">
                   <span className="text-ink-500">Recommended action — </span>
@@ -523,7 +560,7 @@ export default function App() {
                     <cell.icon size={11} strokeWidth={1.75} className={cell.iconColor} /> {cell.label}
                   </span>
                   <span className={`text-xs font-medium truncate ${cell.mono ? 'font-mono' : ''} ${cell.value ? (cell.valueColor || 'text-ink-50') : 'text-ink-500'}`} title={cell.value}>
-                    {cell.value || (cell.label === 'Annual revenue' ? 'Private / unlisted' : 'Not available')}
+                    {cell.value || (cell.label === 'Annual revenue' ? 'Not available' : 'Not available')}
                   </span>
                   {cell.value && cell.source && <SourceBadge source={cell.source} />}
                 </div>
@@ -539,7 +576,7 @@ export default function App() {
                 { key: 'cyber', label: 'Technology & cyber', wt: '20%' },
                 { key: 'compliance', label: 'Regulatory compliance', wt: '10%' },
               ].map((dim) => {
-                const s = result.risk_scores?.[dim.key] ?? 20;
+                const s = result.risk_scores?.[dim.key] ?? null;
                 return (
                   <div key={dim.key} className="bg-surface hover:bg-surface-hover transition-colors p-4 relative">
                     <span className={`absolute left-0 top-0 bottom-0 w-0.5 ${scoreTierColor(s).replace('text-', 'bg-')}`} />
@@ -548,7 +585,7 @@ export default function App() {
                       <span className="text-ink-700">{dim.wt}</span>
                     </div>
                     <div className="flex items-baseline justify-between">
-                      <span className={`text-xl font-semibold font-mono ${scoreTierColor(s)}`}>{s}</span>
+                      <span className={`text-xl font-semibold font-mono ${scoreTierColor(s)}`}>{s ?? '—'}</span>
                       <span className="text-[11px] text-ink-500 font-mono">/100</span>
                     </div>
                   </div>
@@ -598,7 +635,7 @@ export default function App() {
                       Holistic analyst assessment · Section 8
                     </h3>
                     <p className="text-sm text-ink-200 leading-relaxed">
-                      {result.analyst_notes}
+                      {result.analyst_notes || 'No analyst notes recorded. Use the review panel below.'}
                     </p>
                   </div>
 
@@ -622,9 +659,10 @@ export default function App() {
             {activeTab === 'dimensions' && (
               <div className="space-y-3 animate-fade-in">
                 <DimensionCard
+                  parameters={result.policy_parameters || {}}
                   title="Financial viability risk"
                   weight="30% weight"
-                  score={result.risk_scores?.financial ?? 20}
+                  score={result.risk_scores?.financial ?? null}
                   sources="SEDAR+ filings, CBCA registry, solvency, liquidity ratios"
                   summary={result.explanations?.financial?.summary}
                   source={result.explanations?.financial?.source}
@@ -633,10 +671,11 @@ export default function App() {
                 />
 
                 <DimensionCard
+                  parameters={result.policy_parameters || {}}
                   title="Reputational risk"
                   weight="20% weight"
-                  score={result.risk_scores?.reputation ?? 20}
-                  sources="CBC, Globe and Mail, Financial Post, CanLII litigation (36m)"
+                  score={result.risk_scores?.reputation ?? null}
+                  sources={`CBC, Globe and Mail, Financial Post, CanLII litigation (${result.lookback_months ?? 36}m)`}
                   summary={result.explanations?.reputation?.summary}
                   source={result.explanations?.reputation?.source}
                   articles={result.explanations?.reputation?.articles}
@@ -644,9 +683,10 @@ export default function App() {
                 />
 
                 <DimensionCard
+                  parameters={result.policy_parameters || {}}
                   title="Key-person & governance risk"
                   weight="20% weight"
-                  score={result.risk_scores?.key_person ?? 20}
+                  score={result.risk_scores?.key_person ?? null}
                   sources="SEDI insiders, LinkedIn, OFAC/OSFI sanctions lists, CanLII"
                   summary={result.explanations?.key_person?.summary}
                   source={result.explanations?.key_person?.source}
@@ -656,9 +696,10 @@ export default function App() {
                 />
 
                 <DimensionCard
+                  parameters={result.policy_parameters || {}}
                   title="Technology & cybersecurity risk"
                   weight="20% weight"
-                  score={result.risk_scores?.cyber ?? 20}
+                  score={result.risk_scores?.cyber ?? null}
                   sources="CCCS (cyber.gc.ca), CISA KEV, NVD (CVSS ≥ 7.0), HIBP"
                   summary={result.explanations?.cyber?.summary}
                   source={result.explanations?.cyber?.source}
@@ -667,9 +708,10 @@ export default function App() {
                 />
 
                 <DimensionCard
+                  parameters={result.policy_parameters || {}}
                   title="Regulatory compliance risk"
                   weight="10% weight"
-                  score={result.risk_scores?.compliance ?? 20}
+                  score={result.risk_scores?.compliance ?? null}
                   sources="OSFI enforcement, FINTRAC AMPs, CSA orders, OPC PIPEDA, CRTC"
                   summary={result.explanations?.compliance?.summary}
                   source={result.explanations?.compliance?.source}
@@ -691,7 +733,7 @@ export default function App() {
                     {[
                       { k: 'Legal entity name', v: result.vendor_name },
                       { k: 'Jurisdiction', v: result.registration_country },
-                      { k: 'CRA business number', v: result.business_number || 'Inferred via registry' },
+                      { k: 'CRA business number', v: result.business_number || 'Not verified' },
                       { k: 'Executive leadership (CEO)', v: result.company_profile?.ceo, source: result.company_profile?.field_sources?.ceo },
                       { k: 'Corporate founder', v: result.company_profile?.founder, source: result.company_profile?.field_sources?.founder },
                       { k: 'Incorporation year', v: result.company_profile?.founded, source: result.company_profile?.field_sources?.founded },
@@ -711,11 +753,11 @@ export default function App() {
 
                 <div className="panel p-6 space-y-4">
                   <h3 className="text-xs font-medium text-ink-500 uppercase tracking-wider">
-                    Verified financial ratios · SEDAR+ / public disclosures
+                    Retrieved financial metrics · audit verification required
                   </h3>
-                  {result.company_profile?.financial_metrics ? (
+                  {Object.keys(result.company_profile?.financial_metrics || {}).length > 0 ? (
                     <div className="divide-y divide-border text-xs">
-                      {Object.entries(result.company_profile.financial_metrics).map(([k, v], i) => (
+                      {Object.entries(result.company_profile.financial_metrics).filter(([k, v]) => typeof v !== 'object').map(([k, v], i) => (
                         <div key={i} className="py-2.5 flex justify-between gap-4">
                           <span className="text-ink-500 capitalize">{k.replace(/_/g, ' ')}</span>
                           <span className="text-ink-50 font-mono font-medium">{v}</span>
@@ -724,9 +766,10 @@ export default function App() {
                     </div>
                   ) : (
                     <p className="text-xs text-ink-500 leading-relaxed">
-                      Private entity without mandatory TSX/SEDAR+ public filing obligations. Financial viability score computed from web intelligence disclosures.
+                      Financial data was not verified for this run. This does not establish whether the company is private or publicly listed.
                     </p>
                   )}
+                  <FinancialHistory rows={result.company_profile?.financial_metrics?.annual_history || []} />
                 </div>
               </div>
             )}
@@ -804,6 +847,7 @@ export default function App() {
             )}
           </div>
         )}
+        <ReviewPanel apiFetch={apiFetch} result={result} onLoad={setResult} />
       </main>
 
       <footer className="border-t border-border py-8 text-center">

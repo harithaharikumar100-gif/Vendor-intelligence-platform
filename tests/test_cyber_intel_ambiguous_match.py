@@ -41,6 +41,10 @@ CCCS_FAKE_ENTRIES = [
 def fake_caches(monkeypatch):
     monkeypatch.setitem(ci._CISA_KEV_CACHE, "data", CISA_FAKE_KEV)
     monkeypatch.setitem(ci._CCCS_CACHE, "entries", CCCS_FAKE_ENTRIES)
+    monkeypatch.setitem(ci._CCCS_CACHE, "fetched_at", ci._now_iso())
+    monkeypatch.setitem(ci._CCCS_CACHE, "status", "success")
+    monkeypatch.setitem(ci._CISA_KEV_CACHE, "fetched_at", ci._now_iso())
+    monkeypatch.setitem(ci._CISA_KEV_CACHE, "status", "success")
     yield
     ci._CISA_KEV_CACHE["data"] = None
     ci._CCCS_CACHE["entries"] = None

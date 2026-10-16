@@ -21,114 +21,54 @@ def _safe_print(msg: str):
         pass
 
 
-def search_corporations_canada(vendor: str, business_number: str = "") -> dict:
-    """Search Corporations Canada federal registry for the vendor."""
-    results = {"found": False, "source": "Corporations Canada (ic.gc.ca)", "url": ""}
-    try:
-        queries = []
-        if business_number:
-            queries.append(f'"{business_number}" site:ic.gc.ca corporation')
-        queries.append(f'"{vendor}" site:ic.gc.ca "Corporations Canada"')
-        queries.append(f'"{vendor}" ("Corporations Canada" OR "corporate status") registration')
-
-        hits = []
-        for q in queries:
-            hits = _serper(q, 5)
-            if hits:
-                break
-
-        if not hits:
-            results["status"] = "Not found in federal registry search"
-            return results
-
-        top = hits[0]
-        results["found"] = True
-        results["url"] = top.get("link", "")
-        results["snippet"] = top.get("snippet", "")
-
-        # Try to fetch the actual registry page for structured data
-        page_text = _webpage(top.get("link", ""), 8000)
-        if page_text and len(page_text) > 200:
-            m = re.search(r'(?:Status|Statut)[:\s]+([A-Za-z\s]+?)(?:\.|\n|<|,)', page_text)
-            if m:
-                results["status"] = m.group(1).strip()[:50]
-
-            m = re.search(r'(?:Business Number|BN|Numero)[:\s]+(\d{9})', page_text)
-            if m:
-                results["business_number"] = m.group(1)
-
-            m = re.search(
-                r'(?:Registered (?:Office|Address)|Address)[:\s]+([^\n<]{10,120})',
-                page_text, re.I,
-            )
-            if m:
-                results["registered_address"] = m.group(1).strip()[:120]
-
-            directors = re.findall(
-                r'(?:Director|Directeur)[:\s]+([A-Z][a-zA-Z\s\-\.]{2,40})',
-                page_text,
-            )
-            if directors:
-                results["directors"] = list(dict.fromkeys(d.strip() for d in directors))[:10]
-
-        # Fall back to snippet parsing if page fetch yielded nothing
-        if "status" not in results:
-            snippet = top.get("snippet", "") + " " + top.get("title", "")
-            for pattern in [r'\b(Active|Active-Dissolution|Dissolved|Amalgamated|Discontinued|Amalgamated-Out)\b']:
-                m = re.search(pattern, snippet, re.I)
-                if m:
-                    results["status"] = m.group(1)
-                    break
-            if "status" not in results:
-                results["status"] = "Found (status not parsed)"
-
-        _safe_print(f"  [✓] Corporations Canada: {results.get('status', 'found')}")
-    except Exception as e:
-        _safe_print(f"  [!] Corporations Canada lookup failed: {e}")
-        results["error"] = str(e)[:100]
-
-    return results
+def _lookup(vendor, business_number, queries, source):
+    from registry_verification import verify_record, authoritative
+    from evidence import now_utc
+    result = {'found': False, 'identity_verified': False, 'source': source, 'url': '',
+              'candidates': [], 'query_status': 'unknown', 'retrieved_at': now_utc().isoformat(),
+              'method': 'search_index_and_registry_page'}
+    statuses = []
+    verified = []
+    seen = set()
+    for query in queries:
+        hits = _serper(query, 5)
+        statuses.append(getattr(hits, 'query_status', 'unknown'))
+        for hit in hits:
+            url = hit.get('link', '')
+            if url in seen or not authoritative(url):
+                continue
+            seen.add(url)
+            record = verify_record(vendor, business_number, url, _webpage(url, 20000))
+            result['candidates'].append(dict(record, url=url))
+            if record['identity_verified']:
+                verified.append(record)
+    result['query_status'] = ('failed' if any(s not in ('success', 'no_matches') for s in statuses)
+                              else 'success' if seen else 'no_matches')
+    ids = {r.get('business_number') or r.get('corporation_number') for r in verified}
+    if len(ids) == 1:
+        result.update(verified[0], found=True)
+    elif len(ids) > 1:
+        result['ambiguous'] = True
+    return result
 
 
-def search_provincial_registry(vendor: str, country: str = "Canada") -> dict:
-    """Cross-reference provincial corporate registries via Serper."""
-    results = {"found": False, "source": "Provincial Registry Cross-Reference", "url": ""}
-    try:
-        q = (
-            f'"{vendor}" ("corporate registry" OR "company profile" OR "registration") '
-            f'site:gov.on.ca OR site:gov.bc.ca OR site:quebec.ca OR site:alberta.ca '
-            f'OR site:gov.mb.ca OR site:gov.ns.ca'
-        )
-        hits = _serper(q, 5)
-        if hits:
-            results["found"] = True
-            results["url"] = hits[0].get("link", "")
-            results["snippet"] = hits[0].get("snippet", "")
-            _safe_print(f"  [✓] Provincial registry: found on {hits[0].get('link', '')[:60]}")
-        else:
-            results["status"] = "Not found in provincial registry search"
-    except Exception as e:
-        _safe_print(f"  [!] Provincial registry lookup failed: {e}")
-        results["error"] = str(e)[:100]
-
-    return results
+def search_corporations_canada(vendor: str, business_number: str = '') -> dict:
+    queries = [f'"{vendor}" (site:ised-isde.canada.ca OR site:ic.gc.ca) "Corporations Canada"']
+    if business_number:
+        queries.insert(0, f'"{business_number}" "{vendor}" site:ised-isde.canada.ca')
+    return _lookup(vendor, business_number, queries, 'Corporations Canada')
 
 
-def search_all_registries(
-    vendor: str,
-    business_number: str = "",
-    company_url: str = "",
-    country: str = "Canada",
-) -> dict:
-    """Run all registry lookups in parallel."""
+def search_provincial_registry(vendor: str, country: str = 'Canada', business_number: str = '', province: str = '') -> dict:
+    query = (f'"{vendor}" "{province}" ("corporate registry" OR "corporation number") '
+             '(site:ontario.ca OR site:gov.bc.ca OR site:quebec.ca OR site:alberta.ca OR site:gov.mb.ca '
+             'OR site:novascotia.ca OR site:saskatchewan.ca OR site:gnb.ca OR site:gov.nl.ca '
+             'OR site:princeedwardisland.ca OR site:yukon.ca OR site:gov.nt.ca OR site:gov.nu.ca)')
+    return _lookup(vendor, business_number, [query], 'Provincial Registry')
+
+
+def search_all_registries(vendor: str, business_number: str = '', company_url: str = '', country: str = 'Canada', province: str = '') -> dict:
     with ThreadPoolExecutor(max_workers=2) as ex:
-        fed_fut = ex.submit(search_corporations_canada, vendor, business_number)
-        prov_fut = ex.submit(search_provincial_registry, vendor, country)
-
-        fed = fed_fut.result()
-        prov = prov_fut.result()
-
-    return {
-        "federal_registry": fed,
-        "provincial_registry": prov,
-    }
+        fed = ex.submit(search_corporations_canada, vendor, business_number)
+        prov = ex.submit(search_provincial_registry, vendor, country, business_number, province)
+        return {'federal_registry': fed.result(), 'provincial_registry': prov.result()}

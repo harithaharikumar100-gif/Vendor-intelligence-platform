@@ -28,7 +28,7 @@ class TestDetectRecentAttrition:
 
     def test_two_distinct_people_with_departure_language_counted(self):
         persons = [{"name": "Jane Smith"}, {"name": "Bob Jones"}]
-        evidence = "Jane Smith resigned last month. Bob Jones was fired shortly after."
+        evidence = "Jane Smith resigned 1 month ago. Bob Jones was fired 2 weeks ago."
         count, names = ae._detect_recent_attrition(persons, evidence)
         assert count == 2
         assert set(names) == {"Jane Smith", "Bob Jones"}
@@ -37,7 +37,7 @@ class TestDetectRecentAttrition:
         """The exact bug: same person, two different attrition keywords near
         their name, must not be double-counted as two separate exits."""
         persons = [{"name": "John Chen"}]
-        evidence = "John Chen resigned as CEO; sources say he had already stepped down informally weeks earlier."
+        evidence = "John Chen resigned as CEO 2 weeks ago; sources say he had already stepped down informally weeks earlier."
         count, names = ae._detect_recent_attrition(persons, evidence)
         assert count == 1
         assert names == ["John Chen"]
@@ -47,30 +47,30 @@ class TestDetectRecentAttrition:
         persons = [{"name": "Jane Smith"}, {"name": "Bob Jones"}]
         evidence = (
             f"Jane Smith resigned in {stale_year} after a long tenure. "
-            "Bob Jones was fired last month."
+            "Bob Jones was fired 1 month ago."
         )
         count, names = ae._detect_recent_attrition(persons, evidence)
         assert count == 1
         assert names == ["Bob Jones"]
 
-    def test_recent_year_near_the_mention_is_counted(self):
+    def test_year_only_does_not_establish_a_recent_departure(self):
         recent_year = self._year(1)
         persons = [{"name": "Jane Smith"}]
         evidence = f"Jane Smith resigned in {recent_year}."
         count, names = ae._detect_recent_attrition(persons, evidence)
-        assert count == 1
+        assert count == 0
 
-    def test_no_year_present_is_kept_not_dropped(self):
+    def test_undated_departure_does_not_count_as_recent(self):
         """Same 'no positive evidence of staleness -> kept' philosophy as
         the CanLII recency fix elsewhere in this codebase."""
         persons = [{"name": "Jane Smith"}]
         evidence = "Jane Smith resigned amid controversy."
         count, names = ae._detect_recent_attrition(persons, evidence)
-        assert count == 1
+        assert count == 0
 
     def test_person_with_no_departure_language_is_not_counted(self):
         persons = [{"name": "Jane Smith"}, {"name": "Bob Jones"}]
-        evidence = "Jane Smith resigned. Bob Jones continues to lead the finance team."
+        evidence = "Jane Smith resigned 2 weeks ago. Bob Jones continues to lead the finance team."
         count, names = ae._detect_recent_attrition(persons, evidence)
         assert count == 1
         assert names == ["Jane Smith"]
@@ -92,7 +92,7 @@ class TestDetectRecentAttrition:
 
     def test_case_insensitive_name_matching(self):
         persons = [{"name": "Jane Smith"}]
-        evidence = "jane smith resigned last week."
+        evidence = "jane smith resigned 1 week ago."
         count, names = ae._detect_recent_attrition(persons, evidence)
         assert count == 1
 

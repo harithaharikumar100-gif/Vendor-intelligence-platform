@@ -122,16 +122,14 @@ class TestRateLimiter:
 
 
 class TestCreateStores:
-    def test_no_redis_url_falls_back_to_in_memory(self, monkeypatch):
+    def test_no_redis_url_uses_durable_sqlite(self, monkeypatch, tmp_path):
         monkeypatch.setattr(store.config, "REDIS_URL", "")
+        monkeypatch.setattr(store.config, "STATE_DB_PATH", str(tmp_path / "state.sqlite3"))
         kv, limiter = store.create_stores()
-        assert isinstance(kv, store.InMemoryKVStore)
+        assert isinstance(kv, store.SQLiteKVStore)
         assert isinstance(limiter, store.InMemoryRateLimiter)
 
-    def test_unreachable_redis_falls_back_to_in_memory(self, monkeypatch):
-        """A configured-but-down Redis must degrade the service to
-        single-instance behavior, not crash it."""
+    def test_unreachable_redis_fails_closed(self, monkeypatch):
         monkeypatch.setattr(store.config, "REDIS_URL", "redis://localhost:1/0")
-        kv, limiter = store.create_stores()
-        assert isinstance(kv, store.InMemoryKVStore)
-        assert isinstance(limiter, store.InMemoryRateLimiter)
+        with pytest.raises(RuntimeError, match="Refusing to silently switch"):
+            store.create_stores()

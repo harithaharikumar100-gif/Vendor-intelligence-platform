@@ -57,43 +57,18 @@ def _safe_print(msg: str):
 # ─── low-level helpers ────────────────────────────────────────────────────────
 
 def _serper(query: str, num: int = 5) -> list:
-    """
-    Performs a Serper Google Search with 3-retry exponential backoff, per
-    SK-VDD-001 Section 10.2 ("NIVETA shall retry failed source queries up
-    to three times with exponential backoff before logging a gap").
-    """
-    if not SERPER_API_KEY:
-        return []
-    for attempt in range(3):
-        try:
-            session = requests.Session()
-            session.mount('https://', SSLAdapter())
-            r = session.post(
-                "https://google.serper.dev/search",
-                json={"q": query, "num": num},
-                headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
-                timeout=12,
-            )
-            if r.status_code == 200:
-                return r.json().get("organic", [])
-            if r.status_code in (429, 500, 502, 503) and attempt < 2:
-                import time as _time
-                _time.sleep(2 ** attempt)
-                continue
-            return []
-        except Exception as e:
-            if attempt < 2:
-                import time as _time
-                _time.sleep(2 ** attempt)
-                continue
-            _safe_print(f"  [!] Serper failed after 3 retries [{query[:40]}]: {e}")
-            return []
-    return []
+    from source_search import search
+    return search(query, num, os.getenv('SERPER_API_KEY', '').strip())
 
 
 def _webpage(url: str, chars: int = 8000) -> str:
     """Fetch a webpage via Serper's /webpage endpoint or direct requests."""
     if not url:
+        return ""
+    from network_safety import public_https_url
+    try:
+        public_https_url(url)
+    except ValueError:
         return ""
     if not url.startswith("http"):
         url = "https://" + url
@@ -115,7 +90,7 @@ def _webpage(url: str, chars: int = 8000) -> str:
             _safe_print(f"  [!] webpage serper [{url[:50]}]: {e}")
 
     try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10, allow_redirects=False)
         return r.text[:chars]
     except Exception:
         return ""
@@ -373,7 +348,14 @@ def _yfinance(ticker: str) -> dict:
             except Exception:
                 pass
 
+        history = []
+        try:
+            from financial_history import annual_history
+            history = annual_history(t_obj.income_stmt, t_obj.balance_sheet, resolved_ticker or ticker)
+        except Exception:
+            pass  # Missing annual statements remain an explicit gap, never a fabricated history.
         out = {
+            "annual_history": history,
             "ticker": (resolved_ticker or ticker).upper(),
             "revenue": _fmt(info.get("totalRevenue") or info.get("revenue")),
             "net_income": _fmt(info.get("netIncomeToCommon")),
@@ -814,7 +796,7 @@ def fetch_financial_and_profile(
         for k in ("revenue", "net_income", "eps", "pe_ratio", "debt_equity",
                   "net_margin", "operating_margin", "ebitda_margin", "interest_coverage",
                   "roce", "revenue_growth", "current_ratio", "quick_ratio",
-                  "market_cap", "ticker"):
+                  "market_cap", "ticker", "annual_history"):
             if yf_data.get(k):
                 financial_metrics[k] = yf_data[k]
 

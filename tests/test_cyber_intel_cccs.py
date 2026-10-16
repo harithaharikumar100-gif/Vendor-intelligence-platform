@@ -20,6 +20,8 @@ FAKE_ENTRIES = [
 def fake_cccs_cache(monkeypatch):
     monkeypatch.setitem(ci._CCCS_CACHE, "entries", FAKE_ENTRIES)
     monkeypatch.setitem(ci._CCCS_CACHE, "fetched_at", "2026-09-18T18:00:00Z")
+    monkeypatch.setitem(ci._CCCS_CACHE, "fetched_at", ci._now_iso())
+    monkeypatch.setitem(ci._CCCS_CACHE, "status", "success")
     yield
     ci._CCCS_CACHE["entries"] = None
 
@@ -41,7 +43,7 @@ class TestQueryCccsAdvisories:
 
     def test_short_query_returns_empty_without_matching(self):
         result = ci.query_cccs_advisories("ab")
-        assert result == {"entries": [], "total": 0, "source": "CCCS (cyber.gc.ca)", "retrieved_at": result["retrieved_at"]}
+        assert result == {"entries": [], "total": 0, "source": "CCCS (cyber.gc.ca)", "retrieved_at": result["retrieved_at"], "query_status": "unknown"}
 
     def test_result_carries_source_attribution(self):
         result = ci.query_cccs_advisories("SolarWinds")

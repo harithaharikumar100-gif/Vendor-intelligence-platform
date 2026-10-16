@@ -85,15 +85,9 @@ ALLOWED_ORIGINS = [
     ).split(",") if o.strip()
 ]
 
-# Optional Redis connection (e.g. "redis://localhost:6379/0"). When unset
-# (the default), the analysis cache, job store, and rate limiter/quota
-# counters all live in plain in-process memory - fine for one instance, but
-# silently wrong the moment this runs behind more than one replica (each
-# has its own, different state) or the process restarts (everything,
-# including in-flight job records, is dropped). Setting this makes that
-# state shared and durable instead. See store.py; a configured-but-
-# unreachable Redis logs a warning and falls back to in-memory rather than
-# crashing the service.
+# Redis shares jobs, reports and quotas across replicas. Configured Redis failure
+# stops startup instead of silently losing state. Without Redis, SQLite persists
+# jobs/reports on one machine and the rate limiter remains process-local.
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 
 # Legacy single shared-secret API key - kept for backward compatibility.
@@ -114,10 +108,21 @@ def _parse_api_keys() -> dict:
     if raw:
         try:
             parsed = json.loads(raw)
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
-            pass
+            if not isinstance(parsed, dict) or not parsed:
+                raise ValueError()
+            for key, info in parsed.items():
+                if not isinstance(key, str) or not key.strip() or not isinstance(info, dict):
+                    raise ValueError()
+                if not isinstance(info.get('client'), str) or not info['client'].strip():
+                    raise ValueError()
+                quota = info.get('daily_quota')
+                if quota is not None and (isinstance(quota, bool) or not isinstance(quota, int) or quota < 1):
+                    raise ValueError()
+                if info.get('role', 'viewer') not in ('viewer', 'reviewer', 'admin'):
+                    raise ValueError()
+            return parsed
+        except (ValueError, TypeError):
+            raise RuntimeError('Invalid API_KEYS_JSON configuration; refusing to disable authentication.') from None
     if API_KEY:
         return {API_KEY: {"client": "default", "daily_quota": None}}
     return {}
@@ -137,3 +142,8 @@ RATE_LIMIT_WINDOW_SECONDS = max(1, _env_int("RATE_LIMIT_WINDOW_SECONDS", 60))
 # occasional polling to not race a fast eviction, short enough that the
 # store doesn't grow unbounded on a long-running process.
 JOB_RETENTION_SECONDS = max(60, _env_int("JOB_RETENTION_SECONDS", 3600))
+
+# Callback delivery is disabled until the operator explicitly lists trusted public HTTPS hosts.
+CALLBACK_ALLOWED_HOSTS = {h.strip().lower() for h in os.getenv('CALLBACK_ALLOWED_HOSTS', '').split(',') if h.strip()}
+MAX_CONCURRENT_JOBS = max(1, min(16, _env_int('MAX_CONCURRENT_JOBS', 2)))
+STATE_DB_PATH = os.getenv('STATE_DB_PATH', '.state/vendor.sqlite3')

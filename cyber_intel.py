@@ -28,6 +28,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
 import config
+from evidence import expired, within_months
 
 NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 CISA_KEV_FEED = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
@@ -100,7 +101,7 @@ def query_nvd_cves(vendor_or_product: str, min_cvss: float = None, max_results: 
     (Section 11 min_cvss_score, default 7.0/High per Section 6.4.1 step 26).
     """
     min_cvss = config.MIN_CVSS_SCORE if min_cvss is None else min_cvss
-    result = {"cves": [], "total": 0, "source": "NVD (nvd.nist.gov)", "retrieved_at": _now_iso()}
+    result = {"cves": [], "total": 0, "source": "NVD (nvd.nist.gov)", "retrieved_at": _now_iso(), "query_status": "unknown"}
     if not vendor_or_product or len(vendor_or_product) < 3:
         return result
     try:
@@ -111,9 +112,11 @@ def query_nvd_cves(vendor_or_product: str, min_cvss: float = None, max_results: 
             timeout=15,
         )
         if r.status_code != 200:
+            result["query_status"] = "failed"
             _safe_print(f"  [~] NVD API returned {r.status_code} for '{vendor_or_product}'")
             return result
 
+        result["query_status"] = "success"
         data = r.json()
         cves = []
         for item in data.get("vulnerabilities", []):
@@ -165,7 +168,7 @@ def query_nvd_cves(vendor_or_product: str, min_cvss: float = None, max_results: 
 
 def _load_cisa_kev() -> list:
     """Fetches and caches the full CISA KEV catalogue JSON feed in-memory."""
-    if _CISA_KEV_CACHE["data"] is not None:
+    if _CISA_KEV_CACHE["data"] is not None and not expired(_CISA_KEV_CACHE.get("fetched_at"), config.CACHE_TTL_SECONDS if _CISA_KEV_CACHE.get("status") == "success" else 30):
         return _CISA_KEV_CACHE["data"]
     try:
         r = requests.get(CISA_KEV_FEED, timeout=20, headers={"User-Agent": "DRiskify-SK-VDD-001/1.0"})
@@ -173,10 +176,11 @@ def _load_cisa_kev() -> list:
             vulns = r.json().get("vulnerabilities", [])
             _CISA_KEV_CACHE["data"] = vulns
             _CISA_KEV_CACHE["fetched_at"] = _now_iso()
+            _CISA_KEV_CACHE["status"] = "success"
             return vulns
     except Exception as e:
         _safe_print(f"  [!] CISA KEV feed fetch failed: {e}")
-    _CISA_KEV_CACHE["data"] = []
+    _CISA_KEV_CACHE.update(data=[], fetched_at=_now_iso(), status="failed")
     return []
 
 
@@ -185,11 +189,13 @@ def query_cisa_kev(vendor_or_product: str) -> dict:
     Filters the real CISA Known Exploited Vulnerabilities catalogue for entries
     whose vendorProject or product field matches the vendor name.
     """
-    result = {"entries": [], "total": 0, "source": "CISA KEV Catalogue", "retrieved_at": _now_iso()}
+    result = {"entries": [], "total": 0, "source": "CISA KEV Catalogue", "retrieved_at": _now_iso(), "query_status": "unknown"}
     if not vendor_or_product or len(vendor_or_product) < 3:
         return result
     try:
         kev = _load_cisa_kev()
+        result["query_status"] = _CISA_KEV_CACHE.get("status", "unknown")
+        result["retrieved_at"] = _CISA_KEV_CACHE.get("fetched_at")
         needle = vendor_or_product.lower()
         words = _distinctive_words(vendor_or_product)
         matches = []
@@ -229,12 +235,14 @@ def query_cisa_kev(vendor_or_product: str) -> dict:
 
 def _load_cccs_advisories() -> list:
     """Fetches and caches the real CCCS alerts & advisories Atom feed."""
-    if _CCCS_CACHE["entries"] is not None:
+    if _CCCS_CACHE["entries"] is not None and not expired(_CCCS_CACHE.get("fetched_at"), config.CACHE_TTL_SECONDS if _CCCS_CACHE.get("status") == "success" else 30):
         return _CCCS_CACHE["entries"]
     entries = []
+    _CCCS_CACHE["status"] = "failed"
     try:
         r = requests.get(CCCS_ATOM_FEED, timeout=20, headers={"User-Agent": "DRiskify-SK-VDD-001/1.0"})
         if r.status_code == 200:
+            _CCCS_CACHE["status"] = "success"
             ns = {"a": "http://www.w3.org/2005/Atom"}
             root = ET.fromstring(r.content)
             for entry in root.findall("a:entry", ns):
@@ -263,11 +271,13 @@ def query_cccs_advisories(vendor_or_product: str) -> dict:
     The feed is a rolling window of recent advisories, not a full historical
     archive, which matches the spec's own 36-month recency intent.
     """
-    result = {"entries": [], "total": 0, "source": "CCCS (cyber.gc.ca)", "retrieved_at": _now_iso()}
+    result = {"entries": [], "total": 0, "source": "CCCS (cyber.gc.ca)", "retrieved_at": _now_iso(), "query_status": "unknown"}
     if not vendor_or_product or len(vendor_or_product) < 3:
         return result
     try:
         entries = _load_cccs_advisories()
+        result["query_status"] = _CCCS_CACHE.get("status", "unknown")
+        result["retrieved_at"] = _CCCS_CACHE.get("fetched_at")
         needle = vendor_or_product.lower()
         words = _distinctive_words(vendor_or_product)
         matches = []
@@ -302,7 +312,7 @@ def query_hibp_domain(domain: str) -> dict:
     is configured (HIBP v3 requires a paid subscription key). Otherwise this
     is reported as a licensed-source gap by licensed_sources.py, not faked.
     """
-    result = {"breaches": [], "total": 0, "source": "HaveIBeenPwned", "retrieved_at": _now_iso(), "queried": False}
+    result = {"breaches": [], "total": 0, "source": "HaveIBeenPwned", "retrieved_at": _now_iso(), "queried": False, "query_status": "not_configured"}
     api_key = os.getenv("HIBP_API_KEY", "").strip()
     if not api_key or not domain:
         return result
@@ -314,6 +324,7 @@ def query_hibp_domain(domain: str) -> dict:
             timeout=12,
         )
         result["queried"] = True
+        result["query_status"] = "success" if r.status_code == 200 else "failed"
         if r.status_code == 200:
             breaches = r.json()
             result["breaches"] = [
@@ -340,7 +351,7 @@ def gather_cyber_intelligence(vendor: str, domain: str = "") -> dict:
     nvd = query_nvd_cves(vendor)
     kev = query_cisa_kev(vendor)
     cccs = query_cccs_advisories(vendor)
-    hibp = query_hibp_domain(domain) if domain else {"breaches": [], "total": 0, "queried": False}
+    hibp = query_hibp_domain(domain) if domain else {"breaches": [], "total": 0, "queried": False, "query_status": "not_configured"}
 
     # A name-only match (single generic word, no corroborating multi-word
     # phrase) is real evidence of a possible coincidence, not a confirmed
@@ -394,8 +405,11 @@ def gather_cyber_intelligence(vendor: str, domain: str = "") -> dict:
             "retrieved_at": entry["retrieved_at"],
         })
     for breach in hibp.get("breaches", []):
+        if not within_months(breach.get("breach_date"), config.LOOKBACK_MONTHS):
+            continue
         signals.append({
             "category": "Data Breach",
+            "event_date": breach.get("breach_date", ""),
             "indicator": f"Confirmed breach '{breach['name']}' ({breach['breach_date']}) affecting "
                          f"{breach['pwn_count']:,} accounts; data classes: {', '.join(breach['data_classes'][:5])}",
             "severity": "Critical",
@@ -410,6 +424,9 @@ def gather_cyber_intelligence(vendor: str, domain: str = "") -> dict:
         "kev_count": kev["total"],
         "cccs_count": cccs["total"],
         "breach_count": hibp.get("total", 0),
-        "recent_breach_flag": hibp.get("total", 0) > 0,
+        "recent_breach_flag": any(within_months(b.get("breach_date"), 12) for b in hibp.get("breaches", [])),
         "hibp_queried": hibp.get("queried", False),
+        "source_health": [{'source': r.get('source', name), 'status': r.get('query_status', 'unknown'),
+                           'retrieved_at': r.get('retrieved_at'), 'method': 'direct_feed'}
+                          for name, r in [('NVD', nvd), ('CISA KEV', kev), ('CCCS', cccs), ('HIBP breach catalog', hibp)]],
     }

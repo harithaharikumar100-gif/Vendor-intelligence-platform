@@ -9,6 +9,7 @@ All calls are defensive — never raises; returns empty dict on any failure.
 """
 
 import re
+from evidence import now_utc, months_before
 from financial_fetcher import _serper, _webpage
 
 
@@ -48,11 +49,13 @@ def _classify_filing(text: str) -> str:
 
 def search_filings(vendor: str, ticker: str = "") -> dict:
     """Search SEDAR+ for regulatory filings by the vendor."""
-    results = {"filings": [], "total": 0, "source": "SEDAR+ (sedarplus.ca)"}
+    results = {"filings": [], "total": 0, "source": "SEDAR+ (sedarplus.ca)", "query_status": "unknown", "retrieved_at": now_utc().isoformat(), "method": "search_index"}
     try:
+        years = " OR ".join(str(y) for y in range(months_before(__import__("config").LOOKBACK_MONTHS).year, now_utc().year + 1))
+        statuses = []
         queries = [
-            f'"{vendor}" site:sedarplus.ca 2024 OR 2025 OR 2026',
-            f'"{vendor}" ("SEDAR+" OR "sedarplus") ("financial statements" OR "MD&A" OR "annual report" OR "proxy" OR "AIF") 2024 OR 2025',
+            f'"{vendor}" site:sedarplus.ca {years}',
+            f'"{vendor}" ("SEDAR+" OR "sedarplus") ("financial statements" OR "MD&A" OR "annual report" OR "proxy" OR "AIF") {years}',
         ]
         if ticker:
             queries.append(f'"{ticker}" site:sedarplus.ca filing')
@@ -60,12 +63,15 @@ def search_filings(vendor: str, ticker: str = "") -> dict:
         hits = []
         seen_urls = set()
         for q in queries:
-            for h in _serper(q, 8):
+            query_hits = _serper(q, 8)
+            statuses.append(getattr(query_hits, 'query_status', 'unknown'))
+            for h in query_hits:
                 url = h.get("link", "")
                 if url and url not in seen_urls:
                     seen_urls.add(url)
                     hits.append(h)
 
+        results['query_status'] = 'failed' if any(s not in ('success', 'no_matches') for s in statuses) else 'success' if hits else 'no_matches'
         if not hits:
             _safe_print(f"  [~] SEDAR+: no filing results for {vendor}")
             return results
@@ -87,7 +93,7 @@ def search_filings(vendor: str, ticker: str = "") -> dict:
             filings.append({
                 "filing_type": filing_type,
                 "title": title[:200],
-                "date": date or "Recent",
+                "date": date or "",
                 "description": snippet[:300],
                 "url": url,
             })
@@ -116,6 +122,7 @@ def search_filings(vendor: str, ticker: str = "") -> dict:
         _safe_print(f"  [✓] SEDAR+: {len(filings)} filing(s) found for {vendor}")
     except Exception as e:
         _safe_print(f"  [!] SEDAR+ search failed: {e}")
-        results["error"] = str(e)[:100]
+        results["query_status"] = "failed"
+        results["error"] = "Filing retrieval failed"
 
     return results

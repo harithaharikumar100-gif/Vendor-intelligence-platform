@@ -37,6 +37,7 @@ score-consistency fix:
   as _validate_breach_flag: only ever turns the flag OFF, never on.
 """
 import ai_engine as ae
+from evidence import now_utc
 
 
 class TestNormalizeSeverities:
@@ -108,7 +109,7 @@ class TestValidateBreachFlag:
         parsed = {
             "recent_breach_flag": True,
             "signals": [
-                {"category": "Data Breach", "indicator": "Named breach disclosed March 2026", "severity": "High", "sources": ["https://example.com/breach-notice"]},
+                {"category": "Data Breach", "indicator": "Named breach disclosed March 2026", "severity": "High", "sources": ["https://example.com/breach-notice"], "event_date": now_utc().date().isoformat(), "verification_status": "source_linked"},
             ],
         }
         result = ae._validate_breach_flag(parsed)
@@ -118,7 +119,7 @@ class TestValidateBreachFlag:
         parsed = {
             "recent_breach_flag": True,
             "signals": [
-                {"category": "Data Breach", "indicator": "Named breach disclosed", "severity": "Critical", "sources": ["https://example.com/breach"]},
+                {"category": "Data Breach", "indicator": "Named breach disclosed", "severity": "Critical", "sources": ["https://example.com/breach"], "event_date": now_utc().date().isoformat(), "verification_status": "source_linked"},
             ],
         }
         result = ae._validate_breach_flag(parsed)
@@ -442,19 +443,19 @@ class TestValidateSanctionsFlag:
         parsed = {
             "sanctions_match_flag": True,
             "persons": [
-                {"name": "Jane Smith", "flags": ["OFAC SDN list match found"], "severity": "High"},
+                {"name": "Jane Smith", "flags": ["OFAC SDN list match found"], "severity": "High", "sanctions_identity_confirmed": True, "sanctions_record_id": "123", "sources": ["https://ofac.treas.gov/record/123"]},
             ],
         }
         result = ae._validate_sanctions_flag(parsed)
         assert result["sanctions_match_flag"] is True
 
-    def test_true_flag_with_a_critical_severity_person_is_kept(self):
+    def test_critical_severity_without_verified_sanctions_identity_is_cleared(self):
         parsed = {
             "sanctions_match_flag": True,
             "persons": [{"name": "Jane Smith", "severity": "Critical"}],
         }
         result = ae._validate_sanctions_flag(parsed)
-        assert result["sanctions_match_flag"] is True
+        assert result["sanctions_match_flag"] is False
 
     def test_missing_persons_key_is_cleared(self):
         parsed = {"sanctions_match_flag": True}

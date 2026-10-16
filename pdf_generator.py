@@ -43,6 +43,7 @@ BORDER = colors.HexColor("#e5e5e5")
 SURFACE_TINT = colors.HexColor("#fafafa")
 
 TIER_COLORS = {
+    "Not assessed": INK_500,
     "Low": colors.HexColor("#16a34a"),
     "Medium": colors.HexColor("#ca8a04"),
     "High": colors.HexColor("#ea580c"),
@@ -57,8 +58,11 @@ SEVERITY_COLORS = {
 }
 
 
-def _tier_for(score: int) -> str:
-    return "Low" if score <= 24 else ("Medium" if score <= 49 else ("High" if score <= 74 else "Critical"))
+def _tier_for(score: int, parameters=None) -> str:
+    if score is None:
+        return "Not assessed"
+    parameters = parameters or {}
+    return "Low" if score <= 24 else ("Medium" if score < parameters.get('HIGH_SCORE_THRESHOLD', 50) else ("High" if score < parameters.get('CRITICAL_SCORE_THRESHOLD', 75) else "Critical"))
 
 
 class NumberedCanvas(canvas.Canvas):
@@ -100,6 +104,9 @@ def _draw_score_meter(c, x, y, width, height, score, tier_color):
     radius = height / 2
     c.setFillColor(colors.HexColor("#e5e5e5"))
     c.roundRect(x, y, width, height, radius, stroke=0, fill=1)
+    if score is None:
+        c.restoreState()
+        return
     fill_w = max(height, width * (score / 100.0))
     c.setFillColor(tier_color)
     c.roundRect(x, y, fill_w, height, radius, stroke=0, fill=1)
@@ -107,7 +114,7 @@ def _draw_score_meter(c, x, y, width, height, score, tier_color):
 
 
 def _cover_page(c, doc_width, doc_height, result, display_vendor, overall_score, risk_level, traffic_light, conf, query_date):
-    tier_color = TIER_COLORS.get(risk_level, TIER_COLORS["Low"])
+    tier_color = TIER_COLORS.get(risk_level, INK_500)
     page_w, page_h = letter
 
     # Top accent band
@@ -140,19 +147,20 @@ def _cover_page(c, doc_width, doc_height, result, display_vendor, overall_score,
     meter_y = page_h - 280
     c.setFont("Helvetica-Bold", 48)
     c.setFillColor(tier_color)
-    c.drawString(54, meter_y, f"{overall_score}")
+    score_label = str(overall_score) if overall_score is not None else "—"
+    c.drawString(54, meter_y, score_label)
     c.setFont("Helvetica", 13)
     c.setFillColor(INK_500)
-    c.drawString(54 + c.stringWidth(f"{overall_score}", "Helvetica-Bold", 48) + 4, meter_y + 10, "/ 100")
+    c.drawString(54 + c.stringWidth(score_label, "Helvetica-Bold", 48) + 4, meter_y + 10, "/ 100")
 
     c.setFont("Helvetica-Bold", 12)
     c.setFillColor(tier_color)
-    c.drawString(54, meter_y - 22, f"{risk_level.upper()} RISK  ·  {traffic_light.upper()}")
+    c.drawString(54, meter_y - 22, f"{risk_level.upper()}  ·  {'PROVISIONAL' if overall_score is not None else 'ASSESSMENT INCOMPLETE'}")
 
     _draw_score_meter(c, 54, meter_y - 42, 300, 8, overall_score, tier_color)
     c.setFont("Helvetica", 8.5)
     c.setFillColor(INK_500)
-    c.drawString(54, meter_y - 56, f"Data confidence: {conf}%  ·  36-month lookback horizon")
+    c.drawString(54, meter_y - 56, f"Source coverage: {result.get('evidence_coverage', {}).get('successful_checks', 0)}/{result.get('evidence_coverage', {}).get('total_checks', 0)} checks  ·  {result.get('lookback_months', 36)}-month lookback")
 
     action = result.get("recommended_action", "")
     if action:
@@ -239,9 +247,9 @@ def generate_pdf(result: dict, filename: str = "vendor_report.pdf", vendor_name:
     elements = []
 
     display_vendor = vendor_name or result.get("vendor_name") or "Target Entity"
-    overall_score = result.get("overall_score", 20)
-    risk_level = result.get("overall_risk_rating", "Low")
-    traffic_light = result.get("traffic_light", "Green")
+    overall_score = result.get("overall_score")
+    risk_level = result.get("overall_risk_rating", "Not assessed")
+    traffic_light = result.get("traffic_light", "Unrated")
     conf = result.get("confidence_score", 85)
     query_date = result.get("query_date", "")
     risk_scores = result.get("risk_scores", {})
@@ -255,6 +263,9 @@ def generate_pdf(result: dict, filename: str = "vendor_report.pdf", vendor_name:
     # normal flowable content while still triggering the onFirstPage callback.
     elements.append(PageBreak())
 
+    elements.append(Paragraph(_esc(f"Run: {result.get('run_id', 'unsaved')} | Status: {result.get('run_status', 'unverified')} | Policy: {result.get('scoring_policy_version', 'unverified')}"), muted_style))
+    for blocker in result.get('completion_blockers', []):
+        elements.append(Paragraph(_esc(blocker), body_style))
     # ── 1. CORPORATE REGISTRY & ENTITY INFORMATION ──
     elements.append(Paragraph("1. Corporate Registry &amp; Entity Information", h2_style))
     profile_data = [
@@ -283,14 +294,23 @@ def generate_pdf(result: dict, filename: str = "vendor_report.pdf", vendor_name:
 
     fm = profile.get("financial_metrics")
     if fm:
-        elements.append(Paragraph("Verified financial ratios (yfinance / public disclosures)", h3_style))
-        fm_rows = [[Paragraph(_esc(k.replace('_', ' ').title()), muted_style), Paragraph(_esc(v), body_style)] for k, v in fm.items()]
-        fm_table = Table(fm_rows, colWidths=[130, 374])
+        elements.append(Paragraph("Retrieved financial metrics — audit verification required", h3_style))
+        fm_rows = [[Paragraph(_esc(k.replace('_', ' ').title()), muted_style), Paragraph(_esc(v), body_style)] for k, v in fm.items() if not isinstance(v, (list, dict))]
+        fm_table = Table(fm_rows or [[Paragraph('No current quote metrics available.', body_style), '']], colWidths=[130, 374])
         fm_table.setStyle(TableStyle([
             ('BOTTOMPADDING', (0, 0), (-1, -1), 3), ('TOPPADDING', (0, 0), (-1, -1), 3),
             ('LINEBELOW', (0, 0), (-1, -1), 0.5, colors.HexColor("#f1f1f1")),
         ]))
         elements.append(fm_table)
+        history = fm.get('annual_history', [])
+        if history:
+            elements.append(Paragraph('Annual statement ratios (aggregator data; audit opinions not verified)', h3_style))
+            rows = [[Paragraph('Ratio', bold_label_style)] + [Paragraph(_esc(r['fiscal_period_end']), muted_style) for r in history]]
+            for key in ('current_ratio', 'quick_ratio', 'debt_equity', 'interest_coverage', 'net_margin', 'ebitda_margin'):
+                rows.append([Paragraph(_esc(key.replace('_', ' ').title()), muted_style)] + [Paragraph(_esc(r.get(key) if r.get(key) is not None else 'Not available'), body_style) for r in history])
+            elements.append(Table(rows, colWidths=[144] + [360 / len(history)] * len(history), repeatRows=1))
+            for row in history:
+                elements.append(Paragraph(_esc(f"{row['fiscal_period_end']} | {row['source']} | {row['source_url']} | Retrieved {row['retrieved_at']}"), muted_style))
 
     # ── 2. RISK MATRIX ──
     elements.append(Paragraph("2. SK-VDD-001 Multi-Dimensional Risk Matrix", h2_style))
@@ -307,12 +327,12 @@ def generate_pdf(result: dict, filename: str = "vendor_report.pdf", vendor_name:
     ]
     row_colors = [colors.white]
     for k, name, wt in dims:
-        val = int(risk_scores.get(k, 20))
-        tier = _tier_for(val)
+        val = risk_scores.get(k)
+        tier = _tier_for(val, result.get('policy_parameters'))
         tier_color = TIER_COLORS[tier]
         dim_rows.append([
             Paragraph(name, body_style), Paragraph(wt, body_style),
-            Paragraph(f"<b>{val}</b> /100", body_style),
+            Paragraph(f"<b>{val if val is not None else 'Not assessed'}</b>", body_style),
             Paragraph(f"<font color='{_hexstr(tier_color)}'><b>{tier}</b></font>", body_style),
         ])
         row_colors.append(colors.Color(tier_color.red, tier_color.green, tier_color.blue, alpha=0.06))
@@ -327,7 +347,7 @@ def generate_pdf(result: dict, filename: str = "vendor_report.pdf", vendor_name:
     ]
     for i, rc in enumerate(row_colors[1:], start=1):
         tstyle.append(('BACKGROUND', (0, i), (-1, i), rc))
-        tstyle.append(('LINEBEFORE', (0, i), (0, i), 3, TIER_COLORS[_tier_for(int(risk_scores.get(dims[i-1][0], 20)))]))
+        tstyle.append(('LINEBEFORE', (0, i), (0, i), 3, TIER_COLORS[_tier_for(risk_scores.get(dims[i-1][0]), result.get('policy_parameters'))]))
     score_table.setStyle(TableStyle(tstyle))
     elements.append(score_table)
     elements.append(PageBreak())
@@ -344,13 +364,13 @@ def generate_pdf(result: dict, filename: str = "vendor_report.pdf", vendor_name:
 
     for cat_k, name, wt in dims:
         detail = explanations.get(cat_k, {})
-        score_val = int(risk_scores.get(cat_k, 20))
-        tier = _tier_for(score_val)
+        score_val = risk_scores.get(cat_k)
+        tier = _tier_for(score_val, result.get('policy_parameters'))
         tier_color = TIER_COLORS[tier]
 
         block = []
         block.append(Paragraph(
-            f"{name} <font color='{_hexstr(tier_color)}'><b>&nbsp;&nbsp;{score_val}/100 · {tier}</b></font>"
+            f"{name} <font color='{_hexstr(tier_color)}'><b>&nbsp;&nbsp;{score_val if score_val is not None else '—'}/100 · {tier}</b></font>"
             f"&nbsp;&nbsp;<font color='{_hexstr(INK_500)}' size=8>({wt} weight · source: {detail.get('source', 'n/a').replace('_', ' ')})</font>",
             h3_style
         ))
@@ -389,7 +409,7 @@ def generate_pdf(result: dict, filename: str = "vendor_report.pdf", vendor_name:
             persons = detail.get("persons", [])
             if persons:
                 for i, p in enumerate(persons, 1):
-                    flags = ', '.join(str(f) for f in p.get('flags', ['Clean']))
+                    flags = ', '.join(str(f) for f in p.get('flags', ['Not verified']))
                     block.append(Paragraph(
                         f"{i}.&nbsp; <b>{_esc(p.get('name', 'Executive'))}</b> "
                         f"<font color='{_hexstr(INK_500)}'>— {_esc(p.get('role', 'Role'))}</font>: {_esc(flags)}",
@@ -405,7 +425,9 @@ def generate_pdf(result: dict, filename: str = "vendor_report.pdf", vendor_name:
             block.append(Paragraph(_esc(detail), body_style))
 
         block.append(Spacer(1, 8))
-        elements.append(KeepTogether(block))
+        for event in detail.get('signals', []) + detail.get('articles', []) + detail.get('persons', []):
+            block.append(Paragraph(_esc(f"Evidence {event.get('event_id', '')} | Event date: {event.get('event_date') or 'unknown'} | Retrieved: {event.get('retrieved_at') or 'unknown'} | " + ' | '.join(event.get('sources', []))), link_style))
+        elements.extend(block)
 
     # ── 4. NAMED REGULATORY FRAMEWORK ALIGNMENT ──
     # Per the platform's "provided framework" model, the Key-Person/Governance
@@ -470,11 +492,14 @@ def generate_pdf(result: dict, filename: str = "vendor_report.pdf", vendor_name:
                     body_style
                 ))
             block.append(Spacer(1, 6))
-            elements.append(KeepTogether(block))
+            elements.extend(block)
 
     # ── 5. DATA SOURCES, GAPS & LICENSED-SOURCE DISCLOSURE ──
     elements.append(Paragraph("5. Data Sources, Gaps &amp; Confidence Disclosure", h2_style))
 
+    elements.append(Paragraph("Source checks", h3_style))
+    for check in result.get('source_ledger', []):
+        elements.append(Paragraph(_esc(f"{check['source']}: {check['status']} | {check.get('retrieved_at') or 'Not retrieved'}"), body_style))
     sources = result.get("data_sources_used", [])
     if sources:
         elements.append(Paragraph("Sources queried this run (Section 5)", h3_style))
